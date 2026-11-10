@@ -137,6 +137,9 @@ infra/scripts/deploy.sh
   ```bash
   terraform -chdir=infra/terraform import 'google_firestore_database.chat[0]' 'projects/PROJECT_ID/databases/(default)'
   ```
+- **初回 apply で `API has not been used in project ... or it is disabled` (403) が出る場合**:
+  API 有効化の反映待ちです。`api_propagation_wait`（既定 90 秒）で待機していますが、足りない場合は
+  数分待って再実行するか、`api_propagation_wait = "180s"` のように延ばしてください。
 - **state の管理**: セッション署名鍵が state に含まれます。チームで運用する場合は `backend.tf.example` を参考に
   GCS バックエンド（バージョニング有効）を使ってください。
 - **削除**: `deletion_protection = true`（既定）の間は Cloud Run と Firestore を `terraform destroy` で削除できません。

@@ -33,6 +33,15 @@ resource "google_project_service" "services" {
   disable_on_destroy = false
 }
 
+# API 有効化直後は反映まで数分かかることがあり、直後のリソース作成が
+# "API has not been used in project ... or it is disabled" (403) で失敗するため待機する
+resource "time_sleep" "apis_ready" {
+  create_duration = var.api_propagation_wait
+  triggers = {
+    services = join(",", sort([for s in google_project_service.services : s.service]))
+  }
+}
+
 # ---------- 既存の Local LLM (Cloud Run) ----------
 data "google_cloud_run_v2_service" "llm" {
   name     = var.llm_service_name
@@ -54,14 +63,14 @@ resource "google_artifact_registry_repository" "app" {
     }
   }
 
-  depends_on = [google_project_service.services]
+  depends_on = [time_sleep.apis_ready]
 }
 
 # ---------- サービスアカウント ----------
 resource "google_service_account" "app" {
   account_id   = "${var.service_name}-sa"
   display_name = "Chat bot (Cloud Run)"
-  depends_on   = [google_project_service.services]
+  depends_on   = [time_sleep.apis_ready]
 }
 
 # Firestore の読み書き
@@ -89,7 +98,7 @@ resource "google_firestore_database" "chat" {
   delete_protection_state = var.deletion_protection ? "DELETE_PROTECTION_ENABLED" : "DELETE_PROTECTION_DISABLED"
   deletion_policy         = var.deletion_protection ? "ABANDON" : "DELETE"
 
-  depends_on = [google_project_service.services]
+  depends_on = [time_sleep.apis_ready]
 }
 
 # ---------- セッション署名鍵 (Secret Manager) ----------
@@ -104,7 +113,7 @@ resource "google_secret_manager_secret" "session_secret" {
   replication {
     auto {}
   }
-  depends_on = [google_project_service.services]
+  depends_on = [time_sleep.apis_ready]
 }
 
 resource "google_secret_manager_secret_version" "session_secret" {
@@ -182,7 +191,7 @@ resource "google_cloud_run_v2_service" "app" {
   }
 
   depends_on = [
-    google_project_service.services,
+    time_sleep.apis_ready,
     google_secret_manager_secret_version.session_secret,
     google_secret_manager_secret_iam_member.app_session_secret,
     google_project_iam_member.app_datastore,

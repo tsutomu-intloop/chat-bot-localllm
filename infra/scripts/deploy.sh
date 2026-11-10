@@ -18,7 +18,7 @@ terraform -chdir="$TF_DIR" init -input=false
 
 # 1. イメージの push 先を先に作成 (image は未確定のためダミー値)
 terraform -chdir="$TF_DIR" apply -input=false \
-  -target=google_project_service.services \
+  -target=time_sleep.apis_ready \
   -target=google_artifact_registry_repository.app \
   -var "image=bootstrap"
 

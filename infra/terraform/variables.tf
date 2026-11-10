@@ -137,3 +137,9 @@ variable "deletion_protection" {
   type        = bool
   default     = true
 }
+
+variable "api_propagation_wait" {
+  description = "API 有効化後、反映を待つ時間 (初回 apply で 403 が出る場合は延ばす)"
+  type        = string
+  default     = "90s"
+}
