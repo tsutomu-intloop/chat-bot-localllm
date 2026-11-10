@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local LLM Chat</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/vendor-marked.min.js"></script>
+  <script src="/static/vendor-purify.min.js"></script>
+</head>
+<body>
+  <!-- ログイン画面 -->
+  <div id="auth-view" class="auth-view hidden">
+    <form id="auth-form" class="auth-card">
+      <h1>Local LLM Chat</h1>
+      <p class="muted">Cloud Run 上のローカル LLM と会話します</p>
+      <label>ユーザ名<input id="auth-username" autocomplete="username" required></label>
+      <label>パスワード<input id="auth-password" type="password" autocomplete="current-password" required minlength="4"></label>
+      <div id="auth-error" class="error"></div>
+      <button type="submit" id="auth-submit" class="primary">ログイン</button>
+      <button type="button" id="auth-toggle" class="link">アカウントを作成する</button>
+    </form>
+  </div>
+
+  <!-- チャット画面 -->
+  <div id="app-view" class="app hidden">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-top">
+        <button id="new-chat" class="primary wide">＋ 新しい会話</button>
+        <input id="search" type="search" placeholder="履歴を検索 (タイトル・本文)">
+      </div>
+      <nav id="conv-list" class="conv-list"></nav>
+      <div class="sidebar-bottom">
+        <span id="me" class="muted"></span>
+        <button id="logout" class="link">ログアウト</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="toggle-sidebar" class="icon" title="履歴">☰</button>
+        <h2 id="conv-title" class="conv-title" title="クリックで名前を変更">新しい会話</h2>
+        <select id="model-select" title="モデル"></select>
+        <button id="settings-btn" class="icon" title="会話の設定">⚙</button>
+        <div class="menu-wrap">
+          <button id="more-btn" class="icon" title="その他">⋯</button>
+          <div id="more-menu" class="menu hidden">
+            <button data-act="duplicate">会話を複製して再利用</button>
+            <button data-act="export-md">Markdown でエクスポート</button>
+            <button data-act="export-json">JSON でエクスポート</button>
+            <button data-act="delete" class="danger">会話を削除</button>
+          </div>
+        </div>
+      </header>
+
+      <section id="messages" class="messages">
+        <div id="empty" class="empty">
+          <h1>何をお手伝いしましょうか？</h1>
+          <p class="muted">会話は自動で保存され、左の履歴からいつでも再開・複製できます。</p>
+        </div>
+      </section>
+
+      <form id="composer" class="composer">
+        <textarea id="input" rows="1" placeholder="メッセージを入力 (Enter で送信 / Shift+Enter で改行)"></textarea>
+        <button id="send" type="submit" class="primary">送信</button>
+        <button id="stop" type="button" class="hidden">停止</button>
+      </form>
+    </main>
+  </div>
+
+  <dialog id="settings-dialog">
+    <form method="dialog" class="dialog-body">
+      <h3>この会話の設定</h3>
+      <label>システムプロンプト
+        <textarea id="system-prompt" rows="6" placeholder="空欄の場合は既定のシステムプロンプトを使用"></textarea>
+      </label>
+      <div class="row">
+        <button value="cancel">キャンセル</button>
+        <button value="save" class="primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
