@@ -28,7 +28,9 @@ class Settings:
     # LLM に送る直近メッセージ数の上限 (コンテキスト長対策)
     max_history_messages: int = field(default_factory=lambda: int(os.getenv("MAX_HISTORY_MESSAGES", "40")))
 
-    database_url: str = field(default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///./data/chat.db"))
+    # Firestore (未指定時は実行環境の既定プロジェクト / (default) データベース)
+    firestore_project: str = field(default_factory=lambda: os.getenv("FIRESTORE_PROJECT", ""))
+    firestore_database: str = field(default_factory=lambda: os.getenv("FIRESTORE_DATABASE", "(default)"))
     session_secret: str = field(default_factory=lambda: os.getenv("SESSION_SECRET") or secrets.token_urlsafe(32))
     # "local": ユーザ名/パスワードでログイン, "iap": Identity-Aware Proxy のヘッダでユーザ識別
     auth_mode: str = field(default_factory=lambda: os.getenv("AUTH_MODE", "local").lower())

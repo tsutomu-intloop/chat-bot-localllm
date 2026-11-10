@@ -1,9 +1,9 @@
-"""Local LLM チャットボット (FastAPI)."""
+"""Local LLM チャットボット (FastAPI + Firestore)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -11,26 +11,17 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, or_, select
-from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import llm
+from . import llm, store
 from .auth import current_user, hash_password, verify_password
 from .config import settings
-from .db import Conversation, Message, SessionLocal, User, get_db, init_db, utcnow
 
 log = logging.getLogger("chatbot")
 STATIC_DIR = Path(__file__).parent / "static"
+DEFAULT_TITLE = "新しい会話"
 
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    init_db()
-    yield
-
-
-app = FastAPI(title="Local LLM Chatbot", lifespan=lifespan)
+app = FastAPI(title="Local LLM Chatbot")
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.session_secret,
@@ -71,30 +62,25 @@ class Duplicate(BaseModel):
     upto_message_id: str | None = None
 
 
-def _iso(dt: datetime) -> str:
-    return dt.isoformat()
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt else None
 
 
-def conv_dict(c: Conversation, preview: str | None = None) -> dict:
+def conv_out(c: dict) -> dict:
     return {
-        "id": c.id,
-        "title": c.title,
-        "model": c.model,
-        "system_prompt": c.system_prompt,
-        "pinned": c.pinned,
-        "created_at": _iso(c.created_at),
-        "updated_at": _iso(c.updated_at),
-        **({"preview": preview} if preview is not None else {}),
+        "id": c["id"], "title": c["title"], "model": c.get("model"),
+        "system_prompt": c.get("system_prompt"), "pinned": c.get("pinned", False),
+        "created_at": _iso(c.get("created_at")), "updated_at": _iso(c.get("updated_at")),
     }
 
 
-def msg_dict(m: Message) -> dict:
-    return {"id": m.id, "role": m.role, "content": m.content, "created_at": _iso(m.created_at)}
+def msg_out(m: dict) -> dict:
+    return {"id": m["id"], "role": m["role"], "content": m["content"], "created_at": _iso(m.get("created_at"))}
 
 
-def own_conversation(db: Session, user: User, conv_id: str) -> Conversation:
-    conv = db.get(Conversation, conv_id)
-    if conv is None or conv.user_id != user.id:
+def own_conversation(user: dict, conv_id: str) -> dict:
+    conv = store.get_conversation(user["id"], conv_id)
+    if conv is None:
         raise HTTPException(404, "会話が見つかりません")
     return conv
 
@@ -111,28 +97,26 @@ def get_config():
 
 
 @app.post("/api/auth/signup")
-def signup(body: Credentials, request: Request, db: Session = Depends(get_db)):
+def signup(body: Credentials, request: Request):
     if settings.auth_mode != "local" or not settings.allow_signup:
         raise HTTPException(403, "新規登録は無効です")
-    username = body.username.strip()
-    if db.scalar(select(User).where(User.username == username)):
+    try:
+        user = store.create_user(body.username.strip(), hash_password(body.password))
+    except store.AlreadyExists:
         raise HTTPException(409, "このユーザ名は既に使われています")
-    user = User(username=username, password_hash=hash_password(body.password))
-    db.add(user)
-    db.commit()
-    request.session["user_id"] = user.id
-    return {"id": user.id, "username": user.username}
+    request.session["user_id"] = user["id"]
+    return {"id": user["id"], "username": user["username"]}
 
 
 @app.post("/api/auth/login")
-def login(body: Credentials, request: Request, db: Session = Depends(get_db)):
+def login(body: Credentials, request: Request):
     if settings.auth_mode != "local":
         raise HTTPException(400, "このモードではログイン不要です")
-    user = db.scalar(select(User).where(User.username == body.username.strip()))
-    if user is None or not verify_password(body.password, user.password_hash):
+    user = store.get_user_by_username(body.username.strip())
+    if user is None or not verify_password(body.password, user.get("password_hash")):
         raise HTTPException(401, "ユーザ名またはパスワードが違います")
-    request.session["user_id"] = user.id
-    return {"id": user.id, "username": user.username}
+    request.session["user_id"] = user["id"]
+    return {"id": user["id"], "username": user["username"]}
 
 
 @app.post("/api/auth/logout")
@@ -142,100 +126,79 @@ def logout(request: Request):
 
 
 @app.get("/api/me")
-def me(user: User = Depends(current_user)):
-    return {"id": user.id, "username": user.username, "auth_mode": settings.auth_mode}
+def me(user: dict = Depends(current_user)):
+    return {"id": user["id"], "username": user["username"], "auth_mode": settings.auth_mode}
 
 
 # ---------- models ----------
 @app.get("/api/models")
-async def models(_: User = Depends(current_user)):
+async def models(_: dict = Depends(current_user)):
     return {"models": await llm.list_models(), "default": settings.llm_model}
 
 
 # ---------- conversations ----------
 @app.get("/api/conversations")
-def list_conversations(q: str | None = None, user: User = Depends(current_user),
-                       db: Session = Depends(get_db)):
-    stmt = select(Conversation).where(Conversation.user_id == user.id)
-    if q:
-        like = f"%{q}%"
-        matched = select(Message.conversation_id).where(Message.content.ilike(like))
-        stmt = stmt.where(or_(Conversation.title.ilike(like), Conversation.id.in_(matched)))
-    stmt = stmt.order_by(Conversation.pinned.desc(), Conversation.updated_at.desc())
-    convs = db.scalars(stmt).all()
-    return {"conversations": [conv_dict(c) for c in convs]}
+def list_conversations(q: str | None = None, user: dict = Depends(current_user)):
+    return {"conversations": [conv_out(c) for c in store.list_conversations(user["id"], q)]}
 
 
 @app.post("/api/conversations")
-def create_conversation(body: ConversationCreate, user: User = Depends(current_user),
-                        db: Session = Depends(get_db)):
-    conv = Conversation(user_id=user.id, title=(body.title or "新しい会話").strip()[:255],
-                        model=body.model, system_prompt=body.system_prompt)
-    db.add(conv)
-    db.commit()
-    return conv_dict(conv)
+def create_conversation(body: ConversationCreate, user: dict = Depends(current_user)):
+    conv = store.create_conversation(user["id"], (body.title or DEFAULT_TITLE).strip()[:255],
+                                     body.model, body.system_prompt)
+    return conv_out(conv)
 
 
 @app.get("/api/conversations/{conv_id}")
-def get_conversation(conv_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    conv = own_conversation(db, user, conv_id)
-    return {**conv_dict(conv), "messages": [msg_dict(m) for m in conv.messages]}
+def get_conversation(conv_id: str, user: dict = Depends(current_user)):
+    conv = own_conversation(user, conv_id)
+    msgs = store.list_messages(user["id"], conv_id)
+    return {**conv_out(conv), "messages": [msg_out(m) for m in msgs]}
 
 
 @app.patch("/api/conversations/{conv_id}")
-def update_conversation(conv_id: str, body: ConversationUpdate, user: User = Depends(current_user),
-                        db: Session = Depends(get_db)):
-    conv = own_conversation(db, user, conv_id)
+def update_conversation(conv_id: str, body: ConversationUpdate, user: dict = Depends(current_user)):
+    conv = own_conversation(user, conv_id)
     data = body.model_dump(exclude_unset=True)
-    if "title" in data and data["title"] is not None:
-        conv.title = data["title"].strip() or conv.title
-    if "pinned" in data and data["pinned"] is not None:
-        conv.pinned = data["pinned"]
+    fields: dict = {}
+    if data.get("title") is not None and data["title"].strip():
+        fields["title"] = data["title"].strip()
+    if data.get("pinned") is not None:
+        fields["pinned"] = data["pinned"]
     if "model" in data:
-        conv.model = data["model"] or None
+        fields["model"] = data["model"] or None
     if "system_prompt" in data:
-        conv.system_prompt = data["system_prompt"] or None
-    db.commit()
-    return conv_dict(conv)
+        fields["system_prompt"] = data["system_prompt"] or None
+    store.update_conversation(user["id"], conv_id, fields)
+    return conv_out({**conv, **fields})
 
 
 @app.delete("/api/conversations/{conv_id}")
-def delete_conversation(conv_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    conv = own_conversation(db, user, conv_id)
-    db.delete(conv)
-    db.commit()
+def delete_conversation(conv_id: str, user: dict = Depends(current_user)):
+    own_conversation(user, conv_id)
+    store.delete_conversation(user["id"], conv_id)
     return {"ok": True}
 
 
 @app.post("/api/conversations/{conv_id}/duplicate")
-def duplicate_conversation(conv_id: str, body: Duplicate, user: User = Depends(current_user),
-                           db: Session = Depends(get_db)):
+def duplicate_conversation(conv_id: str, body: Duplicate, user: dict = Depends(current_user)):
     """過去の会話をコピー (指定メッセージまでで分岐) して再利用する."""
-    src = own_conversation(db, user, conv_id)
-    new = Conversation(user_id=user.id, title=f"{src.title} (コピー)"[:255],
-                       model=src.model, system_prompt=src.system_prompt)
-    db.add(new)
-    db.flush()
-    for i, m in enumerate(src.messages):
-        db.add(Message(conversation_id=new.id, seq=i, role=m.role, content=m.content))
-        if body.upto_message_id and m.id == body.upto_message_id:
-            break
-    db.commit()
-    return conv_dict(new)
+    own_conversation(user, conv_id)
+    return conv_out(store.duplicate_conversation(user["id"], conv_id, body.upto_message_id))
 
 
 @app.get("/api/conversations/{conv_id}/export")
-def export_conversation(conv_id: str, format: str = "md", user: User = Depends(current_user),
-                        db: Session = Depends(get_db)):
-    conv = own_conversation(db, user, conv_id)
+def export_conversation(conv_id: str, format: str = "md", user: dict = Depends(current_user)):
+    conv = own_conversation(user, conv_id)
+    msgs = store.list_messages(user["id"], conv_id)
     if format == "json":
-        data = {**conv_dict(conv), "messages": [msg_dict(m) for m in conv.messages]}
-        return JSONResponse(data, headers={"Content-Disposition": f'attachment; filename="{conv.id}.json"'})
-    lines = [f"# {conv.title}", ""]
-    for m in conv.messages:
-        lines += [f"## {'ユーザ' if m.role == 'user' else 'アシスタント'}", "", m.content, ""]
+        data = {**conv_out(conv), "messages": [msg_out(m) for m in msgs]}
+        return JSONResponse(data, headers={"Content-Disposition": f'attachment; filename="{conv_id}.json"'})
+    lines = [f"# {conv['title']}", ""]
+    for m in msgs:
+        lines += [f"## {'ユーザ' if m['role'] == 'user' else 'アシスタント'}", "", m["content"], ""]
     return PlainTextResponse("\n".join(lines), media_type="text/markdown; charset=utf-8",
-                             headers={"Content-Disposition": f'attachment; filename="{conv.id}.md"'})
+                             headers={"Content-Disposition": f'attachment; filename="{conv_id}.md"'})
 
 
 # ---------- chat ----------
@@ -243,29 +206,25 @@ def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
-def _build_llm_messages(conv: Conversation) -> list[dict]:
-    history = [{"role": m.role, "content": m.content} for m in conv.messages if m.content]
+def _build_llm_messages(conv: dict, msgs: list[dict]) -> list[dict]:
+    history = [{"role": m["role"], "content": m["content"]} for m in msgs if m["content"]]
     history = history[-settings.max_history_messages:]
-    system = conv.system_prompt or settings.system_prompt
+    system = conv.get("system_prompt") or settings.system_prompt
     return ([{"role": "system", "content": system}] if system else []) + history
 
 
-def _next_seq(db: Session, conv_id: str) -> int:
-    cur = db.scalar(select(func.max(Message.seq)).where(Message.conversation_id == conv_id))
-    return (cur if cur is not None else -1) + 1
+def _stream_reply(user_id: str, conv: dict, msgs: list[dict], extra: dict | None = None) -> StreamingResponse:
+    llm_messages = _build_llm_messages(conv, msgs)
 
-
-def _stream_reply(conv_id: str, extra: dict | None = None) -> StreamingResponse:
     async def gen():
-        db = SessionLocal()
         parts: list[str] = []
         error: str | None = None
+        saved = None
         try:
-            conv = db.get(Conversation, conv_id)
             if extra:
                 yield _sse({"type": "meta", **extra})
             try:
-                async for delta in llm.stream_chat(_build_llm_messages(conv), conv.model):
+                async for delta in llm.stream_chat(llm_messages, conv.get("model")):
                     parts.append(delta)
                     yield _sse({"type": "delta", "content": delta})
             except llm.LLMError as e:
@@ -276,57 +235,47 @@ def _stream_reply(conv_id: str, extra: dict | None = None) -> StreamingResponse:
         finally:
             # 途中で切断されても生成済みの内容は保存する
             content = "".join(parts)
-            msg = None
             if content:
-                msg = Message(conversation_id=conv_id, seq=_next_seq(db, conv_id),
-                              role="assistant", content=content)
-                db.add(msg)
-                conv = db.get(Conversation, conv_id)
-                conv.updated_at = utcnow()
-                db.commit()
-            db.close()
+                saved = await asyncio.to_thread(store.add_message, user_id, conv["id"], "assistant", content)
         if error:
             yield _sse({"type": "error", "message": error})
-        yield _sse({"type": "done", "message_id": msg.id if msg else None})
+        yield _sse({"type": "done", "message_id": saved["id"] if saved else None})
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/conversations/{conv_id}/messages")
-def send_message(conv_id: str, body: SendMessage, user: User = Depends(current_user),
-                 db: Session = Depends(get_db)):
-    conv = own_conversation(db, user, conv_id)
+def send_message(conv_id: str, body: SendMessage, user: dict = Depends(current_user)):
+    uid = user["id"]
+    conv = own_conversation(user, conv_id)
 
     if body.edit_message_id:
-        target = db.get(Message, body.edit_message_id)
-        if target is None or target.conversation_id != conv.id:
+        target = store.get_message(uid, conv_id, body.edit_message_id)
+        if target is None:
             raise HTTPException(404, "メッセージが見つかりません")
-        db.execute(delete(Message).where(Message.conversation_id == conv.id, Message.seq >= target.seq))
-        db.flush()
+        store.truncate_messages(uid, conv_id, target["seq"])
 
-    is_first = db.scalar(select(func.count()).select_from(Message)
-                         .where(Message.conversation_id == conv.id)) == 0
-    user_msg = Message(conversation_id=conv.id, seq=_next_seq(db, conv.id), role="user",
-                       content=body.content)
-    db.add(user_msg)
-    if is_first and conv.title == "新しい会話":
-        conv.title = body.content.strip().splitlines()[0][:40] or conv.title
-    conv.updated_at = utcnow()
-    db.commit()
-    return _stream_reply(conv.id, {"user_message_id": user_msg.id, "title": conv.title})
+    msgs = store.list_messages(uid, conv_id)
+    extra_fields = {}
+    if not msgs and conv["title"] == DEFAULT_TITLE:
+        extra_fields["title"] = body.content.strip().splitlines()[0][:40] or DEFAULT_TITLE
+        conv["title"] = extra_fields["title"]
+    user_msg = store.add_message(uid, conv_id, "user", body.content, extra_fields, existing=msgs)
+    return _stream_reply(uid, conv, msgs + [user_msg], {"user_message_id": user_msg["id"], "title": conv["title"]})
 
 
 @app.post("/api/conversations/{conv_id}/regenerate")
-def regenerate(conv_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    conv = own_conversation(db, user, conv_id)
-    msgs = conv.messages
+def regenerate(conv_id: str, user: dict = Depends(current_user)):
+    uid = user["id"]
+    conv = own_conversation(user, conv_id)
+    msgs = store.list_messages(uid, conv_id)
     if not msgs:
         raise HTTPException(400, "メッセージがありません")
-    if msgs[-1].role == "assistant":
-        db.delete(msgs[-1])
-        db.commit()
-    return _stream_reply(conv.id)
+    if msgs[-1]["role"] == "assistant":
+        store.truncate_messages(uid, conv_id, msgs[-1]["seq"])
+        msgs = msgs[:-1]
+    return _stream_reply(uid, conv, msgs)
 
 
 # ---------- health / static ----------

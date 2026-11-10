@@ -29,16 +29,13 @@ gcloud secrets describe chat-bot-session-secret >/dev/null 2>&1 || \
 gcloud secrets add-iam-policy-binding chat-bot-session-secret \
   --member "serviceAccount:${SA}" --role roles/secretmanager.secretAccessor >/dev/null
 
-EXTRA_ARGS=()
-if [[ -n "${CLOUDSQL_INSTANCE:-}" ]]; then
-  EXTRA_ARGS+=(--add-cloudsql-instances "$CLOUDSQL_INSTANCE")
-fi
-if [[ -n "${DATABASE_URL_SECRET:-}" ]]; then
-  EXTRA_ARGS+=(--set-secrets "DATABASE_URL=${DATABASE_URL_SECRET}:latest,SESSION_SECRET=chat-bot-session-secret:latest")
-else
-  echo "警告: DATABASE_URL_SECRET 未指定のため SQLite (コンテナ内, 非永続) を使用します。本番では Cloud SQL を指定してください。"
-  EXTRA_ARGS+=(--set-secrets "SESSION_SECRET=chat-bot-session-secret:latest")
-fi
+# Firestore (ネイティブモード) を用意し、読み書き権限を付与
+FIRESTORE_DATABASE="${FIRESTORE_DATABASE:-(default)}"
+gcloud services enable firestore.googleapis.com
+gcloud firestore databases describe --database="$FIRESTORE_DATABASE" >/dev/null 2>&1 || \
+  gcloud firestore databases create --database="$FIRESTORE_DATABASE" --location="$REGION" --type=firestore-native
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${SA}" --role roles/datastore.user --condition=None >/dev/null
 
 gcloud run deploy "$SERVICE" \
   --source . \
@@ -46,5 +43,5 @@ gcloud run deploy "$SERVICE" \
   --service-account "$SA" \
   --allow-unauthenticated \
   --timeout 3600 \
-  --set-env-vars "LLM_BASE_URL=${LLM_URL},LLM_API_TYPE=${LLM_API_TYPE},LLM_MODEL=${LLM_MODEL},LLM_USE_ID_TOKEN=true,COOKIE_SECURE=true,AUTH_MODE=${AUTH_MODE:-local},ALLOW_SIGNUP=${ALLOW_SIGNUP:-true}" \
-  "${EXTRA_ARGS[@]}"
+  --set-secrets "SESSION_SECRET=chat-bot-session-secret:latest" \
+  --set-env-vars "^@^FIRESTORE_PROJECT=${PROJECT_ID}@FIRESTORE_DATABASE=${FIRESTORE_DATABASE}@LLM_BASE_URL=${LLM_URL}@LLM_API_TYPE=${LLM_API_TYPE}@LLM_MODEL=${LLM_MODEL}@LLM_USE_ID_TOKEN=true@COOKIE_SECURE=true@AUTH_MODE=${AUTH_MODE:-local}@ALLOW_SIGNUP=${ALLOW_SIGNUP:-true}"

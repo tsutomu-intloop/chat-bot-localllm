@@ -1,24 +1,18 @@
 import json
 import os
 
-os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["SESSION_SECRET"] = "test"
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlalchemy import create_engine
-
-from app import db as dbmod
-from app import llm, main
+from app import llm, main, store
+from tests.fake_firestore import FakeFirestore
 
 
 @pytest.fixture()
 def client(monkeypatch):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    dbmod.SessionLocal.configure(bind=engine)
-    monkeypatch.setattr(dbmod, "engine", engine)
-    dbmod.Base.metadata.create_all(engine)
+    fs = FakeFirestore()
+    store.set_client(fs)
 
     seen = []
 
@@ -34,7 +28,9 @@ def client(monkeypatch):
     monkeypatch.setattr(llm, "list_models", fake_models)
     with TestClient(main.app) as c:
         c.seen = seen
+        c.fs = fs
         yield c
+    store.set_client(None)
 
 
 def events(resp):
@@ -106,3 +102,36 @@ def test_users_are_isolated(client):
     assert client.post("/api/auth/login", json={"username": "alice", "password": "wrong"}).status_code == 401
     assert client.post("/api/auth/login", json={"username": "alice", "password": "pass1234"}).status_code == 200
     assert len(client.get("/api/conversations").json()["conversations"]) == 1
+
+
+def test_duplicate_signup_rejected(client):
+    signup(client, "alice")
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/signup", json={"username": "alice", "password": "other123"})
+    assert r.status_code == 409
+
+
+def test_pin_order_and_delete_removes_messages(client):
+    signup(client)
+    a = client.post("/api/conversations", json={"title": "A"}).json()
+    b = client.post("/api/conversations", json={"title": "B"}).json()
+    client.post(f"/api/conversations/{a['id']}/messages", json={"content": "hi"})
+    titles = [c["title"] for c in client.get("/api/conversations").json()["conversations"]]
+    assert titles == ["A", "B"]  # 更新日時の新しい順
+    client.patch(f"/api/conversations/{b['id']}", json={"pinned": True})
+    titles = [c["title"] for c in client.get("/api/conversations").json()["conversations"]]
+    assert titles == ["B", "A"]  # ピン留めが先頭
+
+    client.delete(f"/api/conversations/{a['id']}")
+    assert not any(a["id"] in p for p in client.fs.docs)  # メッセージのサブコレクションも削除
+
+
+def test_iap_mode(client, monkeypatch):
+    from dataclasses import replace
+    from app import auth
+    monkeypatch.setattr(auth, "settings", replace(auth.settings, auth_mode="iap"))
+    h = {"X-Goog-Authenticated-User-Email": "accounts.google.com:user@example.com"}
+    assert client.get("/api/me").status_code == 401
+    assert client.get("/api/me", headers=h).json()["username"] == "user@example.com"
+    client.post("/api/conversations", json={"title": "x"}, headers=h)
+    assert len(client.get("/api/conversations", headers=h).json()["conversations"]) == 1

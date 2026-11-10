@@ -6,7 +6,7 @@ Cloud Run 上にデプロイしたローカル LLM（Ollama / vLLM などの Ope
 ```
 ブラウザ ──> chat-bot (Cloud Run, FastAPI + Web UI) ──(ID トークン)──> Local LLM (Cloud Run: Ollama 等)
                        │
-                       └── 会話履歴 DB (SQLite / Cloud SQL PostgreSQL)
+                       └── 会話履歴 (Firestore)
 ```
 
 ## 機能
@@ -14,7 +14,7 @@ Cloud Run 上にデプロイしたローカル LLM（Ollama / vLLM などの Ope
 | 機能 | 内容 |
 | --- | --- |
 | ユーザ管理 | ユーザ名/パスワードでのログイン（`AUTH_MODE=local`）、または IAP の Google アカウント（`AUTH_MODE=iap`） |
-| 会話履歴 | ユーザごとに保存。サイドバーに「今日 / 昨日 / 過去7日間…」でグループ表示 |
+| 会話履歴 | ユーザごとに Firestore へ保存。サイドバーに「今日 / 昨日 / 過去7日間…」でグループ表示 |
 | 再利用 | 過去の会話を開いてそのまま続きから会話（履歴は LLM に文脈として送信） |
 | 検索 | タイトル・本文の全文検索 |
 | 複製・分岐 | 会話全体の複製、任意のアシスタント応答の時点から新しい会話として分岐 |
@@ -28,7 +28,14 @@ Cloud Run 上にデプロイしたローカル LLM（Ollama / vLLM などの Ope
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # LLM_BASE_URL などを編集
+cp .env.example .env   # LLM_BASE_URL / FIRESTORE_PROJECT などを編集
+```
+
+Firestore には Application Default Credentials で接続します（`gcloud auth application-default login`）。
+実プロジェクトを使わずに試す場合は Firestore エミュレータを起動し、`FIRESTORE_EMULATOR_HOST` を設定してください:
+
+```bash
+gcloud emulators firestore start --host-port=localhost:8085
 ```
 
 ```bash
@@ -57,7 +64,8 @@ gcloud run services proxy ollama --region asia-northeast1 --port 11434
 | `LLM_TIMEOUT` | `300` | LLM 応答のタイムアウト秒 |
 | `SYSTEM_PROMPT` | 日本語アシスタント | 既定のシステムプロンプト |
 | `MAX_HISTORY_MESSAGES` | `40` | LLM に送る直近の履歴件数 |
-| `DATABASE_URL` | `sqlite:///./data/chat.db` | 履歴 DB（SQLAlchemy URL） |
+| `FIRESTORE_PROJECT` | 実行環境の既定 | 履歴を保存する Firestore のプロジェクト |
+| `FIRESTORE_DATABASE` | `(default)` | Firestore のデータベース ID |
 | `AUTH_MODE` | `local` | `local` / `iap` |
 | `ALLOW_SIGNUP` | `true` | 画面からの新規登録を許可 |
 | `SESSION_SECRET` | ランダム | セッション Cookie 署名鍵。**本番では必ず固定値を設定** |
@@ -65,39 +73,34 @@ gcloud run services proxy ollama --region asia-northeast1 --port 11434
 
 ## Cloud Run へのデプロイ
 
-### 1. 履歴 DB（推奨: Cloud SQL for PostgreSQL）
+### 1. 履歴の保存先（Firestore）
 
-Cloud Run のファイルシステムは揮発性のため、SQLite のままだと再起動で履歴が消えます。本番では Cloud SQL を使ってください。
+会話履歴は Firestore（ネイティブモード）に保存します。データ構造は以下の通りで、
+会話はユーザのサブコレクションに置くため、他ユーザの会話には構造的にアクセスできません。
 
-```bash
-gcloud sql instances create chat-bot-db --database-version=POSTGRES_16 --region=asia-northeast1 --tier=db-f1-micro
+```
+users/{user_id}                                      username, password_hash, created_at
+  conversations/{conv_id}                            title, model, system_prompt, pinned,
+                                                     search_text, created_at, updated_at
+    messages/{msg_id}                                seq, role, content, created_at
 ```
 
-```bash
-gcloud sql databases create chatbot --instance=chat-bot-db
-```
-
-```bash
-gcloud sql users create chatbot --instance=chat-bot-db --password='STRONG_PASSWORD'
-```
-
-```bash
-printf 'postgresql+psycopg://chatbot:STRONG_PASSWORD@/chatbot?host=/cloudsql/PROJECT_ID:asia-northeast1:chat-bot-db' | gcloud secrets create chat-bot-database-url --data-file=-
-```
-
-テーブルは起動時に自動作成されます。デプロイ用サービスアカウントに `roles/cloudsql.client` と
-シークレットの `roles/secretmanager.secretAccessor` を付与してください。
+- 追加のインデックス作成は不要です（単一フィールドの自動インデックスのみ使用）。
+- Firestore は部分一致検索ができないため、会話ドキュメントに本文を小文字化した `search_text` を保持し、
+  アプリ側で絞り込んでいます（1 会話あたり 20 万文字まで）。
+- データベースの作成とサービスアカウントへの `roles/datastore.user` 付与は `deploy.sh` が行います。
 
 ### 2. デプロイ
 
 ```bash
-PROJECT_ID=your-project REGION=asia-northeast1 LLM_SERVICE=ollama CLOUDSQL_INSTANCE=your-project:asia-northeast1:chat-bot-db DATABASE_URL_SECRET=chat-bot-database-url ./deploy.sh
+PROJECT_ID=your-project REGION=asia-northeast1 LLM_SERVICE=ollama ./deploy.sh
 ```
 
 `deploy.sh` は以下を行います:
 
 - チャットボット用サービスアカウントを作成し、LLM サービスへの `roles/run.invoker` を付与
   （LLM 側は `--no-allow-unauthenticated` のまま非公開にできます）
+- Firestore データベースを作成（未作成の場合）し、`roles/datastore.user` を付与
 - セッション署名鍵を Secret Manager に作成
 - `gcloud run deploy --source .` でビルド＆デプロイ（ストリーミングのため `--timeout 3600`）
 

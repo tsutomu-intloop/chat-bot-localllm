@@ -5,12 +5,10 @@ import hashlib
 import hmac
 import secrets
 
-from fastapi import Depends, HTTPException, Request
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from fastapi import HTTPException, Request
 
+from . import store
 from .config import settings
-from .db import User, get_db
 
 IAP_HEADER = "x-goog-authenticated-user-email"
 
@@ -32,28 +30,18 @@ def verify_password(password: str, stored: str | None) -> bool:
     return hmac.compare_digest(digest.hex(), digest_hex)
 
 
-def _get_or_create_iap_user(db: Session, email: str) -> User:
-    user = db.scalar(select(User).where(User.username == email))
-    if user is None:
-        user = User(username=email)
-        db.add(user)
-        db.commit()
-    return user
-
-
-def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+def current_user(request: Request) -> dict:
     if settings.auth_mode == "iap":
         raw = request.headers.get(IAP_HEADER)
         if not raw:
             raise HTTPException(401, "IAP ヘッダがありません")
         # 形式: "accounts.google.com:user@example.com"
-        email = raw.split(":", 1)[-1]
-        return _get_or_create_iap_user(db, email)
+        return store.get_or_create_user(raw.split(":", 1)[-1])
 
     user_id = request.session.get("user_id")
     if not user_id:
         raise HTTPException(401, "ログインが必要です")
-    user = db.get(User, user_id)
+    user = store.get_user(user_id)
     if user is None:
         request.session.clear()
         raise HTTPException(401, "ログインが必要です")
