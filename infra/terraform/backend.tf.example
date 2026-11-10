@@ -1,0 +1,9 @@
+# backend.tf にリネームして使用。バケットは事前に作成しておく:
+#   gcloud storage buckets create gs://YOUR_PROJECT-tfstate --location=asia-northeast1 --uniform-bucket-level-access
+#   gcloud storage buckets update gs://YOUR_PROJECT-tfstate --versioning
+terraform {
+  backend "gcs" {
+    bucket = "YOUR_PROJECT-tfstate"
+    prefix = "chat-bot-localllm"
+  }
+}

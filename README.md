@@ -88,21 +88,59 @@ users/{user_id}                                      username, password_hash, cr
 - 追加のインデックス作成は不要です（単一フィールドの自動インデックスのみ使用）。
 - Firestore は部分一致検索ができないため、会話ドキュメントに本文を小文字化した `search_text` を保持し、
   アプリ側で絞り込んでいます（1 会話あたり 20 万文字まで）。
-- データベースの作成とサービスアカウントへの `roles/datastore.user` 付与は `deploy.sh` が行います。
+- データベースの作成とサービスアカウントへの `roles/datastore.user` 付与は Terraform が行います。
 
-### 2. デプロイ
+### 2. Terraform でインフラ構築・デプロイ
+
+インフラは `infra/terraform` で管理します。
+
+| リソース | 内容 |
+| --- | --- |
+| `google_project_service` | Cloud Run / Firestore / Secret Manager / Artifact Registry / Cloud Build / IAM の API 有効化 |
+| `google_artifact_registry_repository` | コンテナイメージの保存先（直近 10 バージョンを保持） |
+| `google_service_account` | チャットボット専用サービスアカウント |
+| `google_firestore_database` | 会話履歴用 Firestore（ネイティブモード、削除保護あり） |
+| `google_secret_manager_secret` | セッション Cookie 署名鍵（`random_password` で生成） |
+| IAM | Firestore 読み書き（`roles/datastore.user`）、署名鍵の参照、**既存 LLM サービスの `roles/run.invoker`** |
+| `google_cloud_run_v2_service` | チャットボット本体（タイムアウト 3600 秒、`/healthz` のプローブ） |
+| 公開設定 | `allow_unauthenticated=true` で allUsers に公開（アプリ側でログイン）、`false` で `invoker_members` のみ |
+
+既存の Local LLM の Cloud Run サービスはデータソースとして参照するだけで、Terraform の管理下には入りません。
+LLM 側は `--no-allow-unauthenticated` のまま非公開にでき、チャットボットは ID トークンで呼び出します。
+
+#### 前提
+
+- Terraform 1.5 以上、gcloud CLI（`gcloud auth login` と `gcloud auth application-default login` 済み）
+- 実行ユーザに Owner、または同等の権限（API 有効化、IAM 付与、Cloud Run / Firestore / Secret Manager / Artifact Registry の管理）
+
+#### 手順
 
 ```bash
-PROJECT_ID=your-project REGION=asia-northeast1 LLM_SERVICE=ollama ./deploy.sh
+cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars   # project_id などを編集
 ```
 
-`deploy.sh` は以下を行います:
+```bash
+infra/scripts/deploy.sh
+```
 
-- チャットボット用サービスアカウントを作成し、LLM サービスへの `roles/run.invoker` を付与
-  （LLM 側は `--no-allow-unauthenticated` のまま非公開にできます）
-- Firestore データベースを作成（未作成の場合）し、`roles/datastore.user` を付与
-- セッション署名鍵を Secret Manager に作成
-- `gcloud run deploy --source .` でビルド＆デプロイ（ストリーミングのため `--timeout 3600`）
+`deploy.sh` は次の順で実行します（イメージの push 先を先に作る必要があるため 2 段階で apply します）:
+
+1. `terraform apply -target` で API 有効化と Artifact Registry を作成
+2. `infra/scripts/build.sh` で Cloud Build によりイメージをビルド・push
+3. `terraform apply -var image=...` で全リソースを作成・更新し、URL を出力
+
+アプリだけを更新する場合も同じスクリプトを再実行してください（新しいタグのイメージで Cloud Run が更新されます）。
+
+#### 補足
+
+- **Firestore の `(default)` データベースが既に存在する場合**は `create_firestore_database = false` にするか、import してください:
+  ```bash
+  terraform -chdir=infra/terraform import 'google_firestore_database.chat[0]' 'projects/PROJECT_ID/databases/(default)'
+  ```
+- **state の管理**: セッション署名鍵が state に含まれます。チームで運用する場合は `backend.tf.example` を参考に
+  GCS バックエンド（バージョニング有効）を使ってください。
+- **削除**: `deletion_protection = true`（既定）の間は Cloud Run と Firestore を `terraform destroy` で削除できません。
+  削除する場合は `false` にして apply してから destroy してください。
 
 ### 社内向けに Google アカウントで制限したい場合
 

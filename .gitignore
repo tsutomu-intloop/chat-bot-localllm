@@ -4,3 +4,12 @@ __pycache__/
 .venv/
 .env
 *.whl
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+.terraform.lock.hcl.bak
+backend.tf

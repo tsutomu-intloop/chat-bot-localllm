@@ -1,0 +1,18 @@
+project_id = "your-project-id"
+region     = "asia-northeast1"
+
+# infra/scripts/build.sh の出力したイメージ
+image = "asia-northeast1-docker.pkg.dev/your-project-id/chat-bot/chat-bot:latest"
+
+# 既存の Local LLM (Cloud Run) サービス
+llm_service_name = "ollama"
+llm_api_type     = "ollama"
+llm_model        = "gemma3:4b"
+
+# (default) データベースが既に存在する場合は false にするか import する:
+#   terraform import 'google_firestore_database.chat[0]' 'projects/your-project-id/databases/(default)'
+create_firestore_database = true
+
+auth_mode             = "local"
+allow_signup          = true
+allow_unauthenticated = true
