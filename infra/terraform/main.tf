@@ -2,13 +2,15 @@ locals {
   llm_region         = coalesce(var.llm_service_region, var.region)
   firestore_location = coalesce(var.firestore_location, var.region)
   llm_base_url       = coalesce(var.llm_base_url, data.google_cloud_run_v2_service.llm.uri)
+  use_llm_api_key    = nonsensitive(var.llm_api_key != null && var.llm_api_key != "")
 
   env = merge(
     {
       LLM_BASE_URL       = local.llm_base_url
       LLM_API_TYPE       = var.llm_api_type
       LLM_MODEL          = var.llm_model
-      LLM_USE_ID_TOKEN   = "true"
+      LLM_USE_ID_TOKEN   = tostring(var.llm_use_id_token)
+      LLM_API_KEY_HEADER = var.llm_api_key_header
       FIRESTORE_PROJECT  = var.project_id
       FIRESTORE_DATABASE = var.firestore_database
       AUTH_MODE          = var.auth_mode
@@ -127,6 +129,29 @@ resource "google_secret_manager_secret_iam_member" "app_session_secret" {
   member    = google_service_account.app.member
 }
 
+# ---------- LLM の API キー (Secret Manager, 必要な場合のみ) ----------
+resource "google_secret_manager_secret" "llm_api_key" {
+  count     = local.use_llm_api_key ? 1 : 0
+  secret_id = "${var.service_name}-llm-api-key"
+  replication {
+    auto {}
+  }
+  depends_on = [time_sleep.apis_ready]
+}
+
+resource "google_secret_manager_secret_version" "llm_api_key" {
+  count       = local.use_llm_api_key ? 1 : 0
+  secret      = google_secret_manager_secret.llm_api_key[0].id
+  secret_data = var.llm_api_key
+}
+
+resource "google_secret_manager_secret_iam_member" "app_llm_api_key" {
+  count     = local.use_llm_api_key ? 1 : 0
+  secret_id = google_secret_manager_secret.llm_api_key[0].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = google_service_account.app.member
+}
+
 # ---------- チャットボット (Cloud Run) ----------
 resource "google_cloud_run_v2_service" "app" {
   name                = var.service_name
@@ -177,6 +202,19 @@ resource "google_cloud_run_v2_service" "app" {
         }
       }
 
+      dynamic "env" {
+        for_each = local.use_llm_api_key ? [1] : []
+        content {
+          name = "LLM_API_KEY"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.llm_api_key[0].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+
       startup_probe {
         http_get {
           path = "/healthz"
@@ -194,6 +232,8 @@ resource "google_cloud_run_v2_service" "app" {
     time_sleep.apis_ready,
     google_secret_manager_secret_version.session_secret,
     google_secret_manager_secret_iam_member.app_session_secret,
+    google_secret_manager_secret_version.llm_api_key,
+    google_secret_manager_secret_iam_member.app_llm_api_key,
     google_project_iam_member.app_datastore,
     google_firestore_database.chat,
   ]

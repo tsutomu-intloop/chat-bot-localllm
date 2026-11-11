@@ -135,3 +135,25 @@ def test_iap_mode(client, monkeypatch):
     assert client.get("/api/me", headers=h).json()["username"] == "user@example.com"
     client.post("/api/conversations", json={"title": "x"}, headers=h)
     assert len(client.get("/api/conversations", headers=h).json()["conversations"]) == 1
+
+
+@pytest.mark.parametrize("use_id, key, key_header, expected", [
+    (True, "", "Authorization", {"X-Serverless-Authorization": "Bearer IDTOKEN"}),
+    (True, "k1", "Authorization", {"X-Serverless-Authorization": "Bearer IDTOKEN", "Authorization": "Bearer k1"}),
+    (False, "k1", "X-API-Key", {"X-API-Key": "k1"}),
+    (False, "", "Authorization", {}),
+])
+def test_llm_headers(monkeypatch, use_id, key, key_header, expected):
+    import asyncio
+    from dataclasses import replace
+
+    monkeypatch.setattr(llm, "settings", replace(llm.settings, llm_use_id_token=use_id, llm_api_key=key,
+                                                 llm_api_key_header=key_header))
+
+    async def fake_get(audience):
+        return "IDTOKEN"
+
+    monkeypatch.setattr(llm._id_tokens, "get", fake_get)
+    h = asyncio.run(llm._headers())
+    h.pop("Content-Type")
+    assert h == expected

@@ -59,8 +59,9 @@ gcloud run services proxy ollama --region asia-northeast1 --port 11434
 | `LLM_BASE_URL` | `http://localhost:11434` | Local LLM の Cloud Run URL |
 | `LLM_API_TYPE` | `ollama` | `ollama`（`/api/chat`）または `openai`（`/v1/chat/completions`） |
 | `LLM_MODEL` | `gemma3:4b` | 既定モデル。UI ではサーバの一覧から選択可能 |
-| `LLM_USE_ID_TOKEN` | `false` | IAM 認証付き Cloud Run を呼ぶ際に ID トークンを付与 |
-| `LLM_API_KEY` | - | OpenAI 互換サーバの API キー（必要な場合） |
+| `LLM_USE_ID_TOKEN` | `false` | IAM 認証付き Cloud Run を呼ぶ際に ID トークンを `X-Serverless-Authorization` ヘッダで付与 |
+| `LLM_API_KEY` | - | LLM サーバ（または前段のプロキシ）が要求する API キー。ID トークンと併用可 |
+| `LLM_API_KEY_HEADER` | `Authorization` | API キーを送るヘッダ。`Authorization` は `Bearer` 形式、それ以外（`X-API-Key` 等）はキーをそのまま送信 |
 | `LLM_TIMEOUT` | `300` | LLM 応答のタイムアウト秒 |
 | `SYSTEM_PROMPT` | 日本語アシスタント | 既定のシステムプロンプト |
 | `MAX_HISTORY_MESSAGES` | `40` | LLM に送る直近の履歴件数 |

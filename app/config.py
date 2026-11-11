@@ -20,6 +20,8 @@ class Settings:
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gemma3:4b"))
     # OpenAI 互換サーバで API キーが必要な場合
     llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", ""))
+    # API キーを送るヘッダ. Authorization の場合は "Bearer <key>"、それ以外 (X-API-Key 等) はキーをそのまま送る
+    llm_api_key_header: str = field(default_factory=lambda: os.getenv("LLM_API_KEY_HEADER", "Authorization"))
     # Cloud Run の IAM 認証 (--no-allow-unauthenticated) で保護された LLM を呼ぶ場合 true
     llm_use_id_token: bool = field(default_factory=lambda: _bool("LLM_USE_ID_TOKEN", False))
     llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "300")))

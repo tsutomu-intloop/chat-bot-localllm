@@ -9,6 +9,13 @@ llm_service_name = "ollama"
 llm_api_type     = "ollama"
 llm_model        = "gemma3:4b"
 
+# LLM の Cloud Run が IAM 認証必須 (--no-allow-unauthenticated) なら true
+llm_use_id_token = true
+# LLM サーバ / 前段プロキシが API キーを要求する場合 (401 unauthorized が返る場合) に設定.
+# tfvars に書かず環境変数で渡すことを推奨: export TF_VAR_llm_api_key=...
+# llm_api_key        = "..."
+# llm_api_key_header = "Authorization"   # X-API-Key 等で送る場合は変更
+
 # (default) データベースが既に存在する場合は false にするか import する:
 #   terraform import 'google_firestore_database.chat[0]' 'projects/your-project-id/databases/(default)'
 create_firestore_database = true

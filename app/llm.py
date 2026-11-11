@@ -45,13 +45,31 @@ _id_tokens = _IdTokenCache()
 
 
 async def _headers() -> dict[str, str]:
+    """LLM へのリクエストヘッダ.
+
+    Cloud Run の IAM 用 ID トークンは X-Serverless-Authorization で送る
+    (Cloud Run が検証後に取り除くため、Authorization ヘッダを LLM アプリ側の API キーに使える).
+    """
     headers = {"Content-Type": "application/json"}
     if settings.llm_use_id_token:
         token = await _id_tokens.get(settings.llm_base_url)
-        headers["Authorization"] = f"Bearer {token}"
-    elif settings.llm_api_key:
-        headers["Authorization"] = f"Bearer {settings.llm_api_key}"
+        headers["X-Serverless-Authorization"] = f"Bearer {token}"
+    if settings.llm_api_key:
+        name = settings.llm_api_key_header
+        if name.lower() == "authorization":
+            headers[name] = f"Bearer {settings.llm_api_key}"
+        else:
+            headers[name] = settings.llm_api_key
     return headers
+
+
+def _auth_hint(status: int) -> str:
+    if status not in (401, 403):
+        return ""
+    if settings.llm_api_key:
+        return " (LLM_API_KEY / LLM_API_KEY_HEADER が LLM サーバの設定と一致しているか確認してください)"
+    return (" (LLM サーバが API キーを要求している可能性があります。LLM_API_KEY を設定してください。"
+            "Cloud Run の IAM で拒否された場合は LLM_USE_ID_TOKEN=true と run.invoker 権限を確認してください)")
 
 
 async def list_models() -> list[str]:
@@ -91,7 +109,7 @@ async def stream_chat(messages: list[dict], model: str | None = None) -> AsyncIt
             async with client.stream("POST", url, json=payload, headers=headers) as resp:
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode(errors="replace")[:500]
-                    raise LLMError(f"LLM サーバエラー ({resp.status_code}): {body}")
+                    raise LLMError(f"LLM サーバエラー ({resp.status_code}): {body}{_auth_hint(resp.status_code)}")
                 async for line in resp.aiter_lines():
                     line = line.strip()
                     if not line:

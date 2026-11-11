@@ -143,3 +143,22 @@ variable "api_propagation_wait" {
   type        = string
   default     = "90s"
 }
+
+variable "llm_use_id_token" {
+  description = "LLM の Cloud Run が IAM 認証必須の場合 true (ID トークンを X-Serverless-Authorization で送る)"
+  type        = bool
+  default     = true
+}
+
+variable "llm_api_key" {
+  description = "LLM サーバ (または前段のプロキシ) が要求する API キー. Secret Manager に保存して Cloud Run に渡す. 不要なら null"
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "llm_api_key_header" {
+  description = "API キーを送るヘッダ名. Authorization の場合は Bearer 形式、それ以外 (X-API-Key 等) はキーをそのまま送る"
+  type        = string
+  default     = "Authorization"
+}
