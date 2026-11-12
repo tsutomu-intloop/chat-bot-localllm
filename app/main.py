@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -11,7 +12,7 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
@@ -33,6 +34,30 @@ app.add_middleware(
     same_site="lax",
     https_only=settings.cookie_secure,
 )
+
+
+@app.middleware("http")
+async def no_cache_for_ui(request: Request, call_next):
+    """画面 (HTML/JS/CSS) は毎回更新を確認させ、デプロイ後に古い JavaScript が使われないようにする."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+def _asset_version(name: str) -> str:
+    return hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:12]
+
+
+def _render_index() -> str:
+    """JS/CSS の URL に内容のハッシュを付け、更新時に確実に新しいファイルを読み込ませる."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "style.css"):
+        html = html.replace(f"/static/{name}", f"/static/{name}?v={_asset_version(name)}")
+    return html
+
+
+INDEX_HTML = _render_index()
 
 
 # ---------- schemas ----------
@@ -388,4 +413,4 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return HTMLResponse(INDEX_HTML)

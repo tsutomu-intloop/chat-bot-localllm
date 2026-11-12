@@ -160,3 +160,10 @@ def test_llm_headers(monkeypatch, use_id, key, key_header, expected):
     h = asyncio.run(llm._headers())
     h.pop("Content-Type")
     assert h == expected
+
+
+def test_ui_is_not_cached_and_assets_are_versioned(client):
+    r = client.get("/")
+    assert r.headers["cache-control"] == "no-cache"
+    assert "/static/app.js?v=" in r.text and "/static/style.css?v=" in r.text
+    assert client.get("/static/app.js").headers["cache-control"] == "no-cache"
