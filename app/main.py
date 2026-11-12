@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
+from . import export as exporter
 from . import files as filesvc, llm, store
 from .auth import current_user, hash_password, verify_password
 from .config import settings
@@ -24,6 +25,16 @@ from .config import settings
 log = logging.getLogger("chatbot")
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_TITLE = "新しい会話"
+
+# 回答をファイルとして保存できることを LLM に伝え、「ファイルは作れません」と答えさせないための指示
+FILE_OUTPUT_GUIDE = (
+    "このチャットでは、ユーザはあなたの回答を Word・Excel・PowerPoint・Markdown・HTML などのファイルとして"
+    "ダウンロードできます。ファイルの作成を頼まれたら「ファイルは作成できない」とは答えず、そのファイルの中身を"
+    "回答として出力してください。文書は見出し（#）・箇条書き・表で構成し、表形式のデータは Markdown の表で、"
+    "スライドは「## スライドのタイトル」ごとに箇条書きで書いてください。プログラム・CSV・JSON などはコードブロックで書き、"
+    "ファイル名が決まっている場合は ```言語:ファイル名 の形式にしてください（例: ```csv:売上.csv）。"
+    "前置きや補足は短くしてください。"
+)
 
 app = FastAPI(title="Local LLM Chatbot")
 app.add_middleware(
@@ -90,6 +101,16 @@ class SendMessage(BaseModel):
 class Duplicate(BaseModel):
     # 指定メッセージまでをコピーして新しい会話に分岐. 省略時は全件.
     upto_message_id: str | None = None
+
+
+def content_disposition(filename: str) -> str:
+    """日本語ファイル名用 (filename*) と、読めないクライアント向けの ASCII 名 (filename) を併記する."""
+    ext = Path(filename).suffix
+    ascii_name = filename.encode("ascii", "ignore").decode().strip(" ._") or f"output{ext}"
+    if not ascii_name.endswith(ext) or ascii_name == ext:
+        ascii_name = f"output{ext}"
+    ascii_name = ascii_name.replace('"', "")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -236,6 +257,27 @@ def duplicate_conversation(conv_id: str, body: Duplicate, user: dict = Depends(c
     return conv_out(new)
 
 
+@app.get("/api/conversations/{conv_id}/messages/{message_id}/export")
+def export_message(conv_id: str, message_id: str, format: str = "docx", user: dict = Depends(current_user)):
+    """回答を Word / Excel / PowerPoint / HTML / Markdown / テキストのファイルに変換してダウンロードする."""
+    if format not in exporter.FORMATS:
+        raise HTTPException(400, f"未対応の形式です: {format}")
+    conv = own_conversation(user, conv_id)
+    msg = store.get_message(user["id"], conv_id, message_id)
+    if msg is None:
+        raise HTTPException(404, "メッセージが見つかりません")
+    title = exporter.title_of(msg["content"], conv["title"])
+    try:
+        data = exporter.convert(msg["content"], format, title)
+    except Exception as e:  # noqa: BLE001
+        log.exception("export failed")
+        raise HTTPException(500, f"ファイルの作成に失敗しました: {e}")
+    media_type, ext = exporter.FORMATS[format]
+    filename = exporter.safe_filename(title, ext)
+    return Response(data, media_type=media_type,
+                    headers={"Content-Disposition": content_disposition(filename)})
+
+
 # ---------- files ----------
 @app.post("/api/conversations/{conv_id}/files")
 async def upload_files(conv_id: str, files: list[UploadFile] = File(...), user: dict = Depends(current_user)):
@@ -286,7 +328,7 @@ def download_file(conv_id: str, file_id: str, user: dict = Depends(current_user)
         raise HTTPException(404, "ファイルが見つかりません")
     data = filesvc.storage().get(f["original_key"])
     return Response(data, media_type=f.get("content_type") or "application/octet-stream",
-                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(f['name'])}"})
+                    headers={"Content-Disposition": content_disposition(f["name"])})
 
 
 @app.delete("/api/conversations/{conv_id}/files/{file_id}")
@@ -322,12 +364,13 @@ def _build_llm_messages(conv: dict, msgs: list[dict], files: list[dict] | None =
     history = [{"role": m["role"], "content": m["content"]} for m in msgs if m["content"]]
     history = history[-settings.max_history_messages:]
     system = conv.get("system_prompt") or settings.system_prompt
+    system = f"{system}\n\n{FILE_OUTPUT_GUIDE}" if system else FILE_OUTPUT_GUIDE
     if files:
         # 直近のユーザ発言 (2 件) を検索クエリにして、関連するファイル内容を渡す
         query = "\n".join(m["content"] for m in [m for m in msgs if m["role"] == "user"][-2:])
         ctx = filesvc.build_file_context(files, query)
         if ctx:
-            system = f"{system}\n\n{ctx}" if system else ctx
+            system = f"{system}\n\n{ctx}"
     return ([{"role": "system", "content": system}] if system else []) + history
 
 

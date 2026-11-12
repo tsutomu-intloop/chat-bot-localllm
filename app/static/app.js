@@ -149,21 +149,90 @@ function renderMessages() {
       el("p", { class: "muted" }, "📎 やドラッグ＆ドロップで PDF・Word・Excel・PowerPoint・テキストを添付すると、その内容を踏まえて回答します。")));
     return;
   }
-  msgs.forEach((m, idx) => box.append(messageNode(m, idx === msgs.length - 1)));
+  msgs.forEach((m, idx) => box.append(messageNode(m, idx === msgs.length - 1, msgs[idx - 1])));
   box.scrollTop = box.scrollHeight;
 }
-function messageNode(m, isLast) {
+// ---------- ファイルとして保存 ----------
+const EXPORT_FORMATS = [
+  ["docx", "Word (.docx)"], ["xlsx", "Excel (.xlsx)"], ["pptx", "PowerPoint (.pptx)"],
+  ["html", "HTML（印刷して PDF にも）"], ["md", "Markdown (.md)"], ["txt", "テキスト (.txt)"],
+];
+const FORMAT_HINTS = [
+  ["xlsx", /excel|エクセル|xlsx|スプレッドシート|表計算/i],
+  ["pptx", /powerpoint|パワポ|pptx|スライド|プレゼン/i],
+  ["docx", /\bword\b|ワード|docx|文書ファイル/i],
+  ["html", /html|web ?ページ|pdf/i],
+  ["md", /markdown|マークダウン|\.md\b/i],
+];
+function suggestFormat(text) {
+  for (const [fmt, re] of FORMAT_HINTS) if (re.test(text || "")) return fmt;
+  return null;
+}
+function download(url) {
+  const a = el("a", { href: url, download: "" });
+  document.body.append(a); a.click(); a.remove();
+}
+function exportUrl(m, fmt) {
+  return `/api/conversations/${state.current.id}/messages/${m.id}/export?format=${fmt}`;
+}
+function showExportMenu(anchor, m) {
+  document.querySelectorAll(".export-menu").forEach((x) => x.remove());
+  const menu = el("div", { class: "menu export-menu" },
+    ...EXPORT_FORMATS.map(([fmt, label]) => el("button", { onclick: () => { menu.remove(); download(exportUrl(m, fmt)); } }, label)));
+  anchor.after(menu);
+  // 下に十分な余白がなければ上向きに開く
+  const composerTop = $("#composer").getBoundingClientRect().top;
+  if (anchor.getBoundingClientRect().bottom + menu.offsetHeight + 8 > composerTop) menu.classList.add("up");
+  setTimeout(() => document.addEventListener("click", () => menu.remove(), { once: true }));
+}
+const CODE_EXT = { python: "py", py: "py", javascript: "js", js: "js", typescript: "ts", ts: "ts", json: "json", csv: "csv",
+  tsv: "tsv", html: "html", css: "css", sql: "sql", bash: "sh", sh: "sh", shell: "sh", yaml: "yaml", yml: "yml", xml: "xml",
+  markdown: "md", md: "md", java: "java", go: "go", ruby: "rb", php: "php", c: "c", cpp: "cpp", csharp: "cs", cs: "cs",
+  rust: "rs", kotlin: "kt", swift: "swift", hcl: "tf", terraform: "tf", powershell: "ps1", text: "txt", txt: "txt", ini: "ini", toml: "toml" };
+const MIME = { csv: "text/csv", json: "application/json", html: "text/html", md: "text/markdown" };
+// コードブロックに「ダウンロード」ボタンを付ける (```言語:ファイル名 ならその名前で保存)
+function enhanceCodeBlocks(bubble) {
+  bubble.querySelectorAll("pre > code").forEach((code) => {
+    const cls = [...code.classList].find((c) => c.startsWith("language-")) || "";
+    const info = cls.slice("language-".length);
+    let [lang, name] = info.includes(":") ? [info.slice(0, info.indexOf(":")), info.slice(info.indexOf(":") + 1)] : [info, ""];
+    if (!name && /\.[a-z0-9]{1,5}$/i.test(lang)) { name = lang; lang = lang.split(".").pop(); }
+    const ext = (name.split(".").pop() || CODE_EXT[lang.toLowerCase()] || "txt").toLowerCase();
+    const filename = name || `${(state.current?.title || "file").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 40)}.${CODE_EXT[lang.toLowerCase()] || "txt"}`;
+    const btn = el("button", { class: "code-dl", title: `${filename} としてダウンロード`, onclick: () => {
+      let text = code.textContent;
+      const bom = ext === "csv" || ext === "tsv" ? "\ufeff" : ""; // Excel で文字化けしないよう BOM を付ける
+      const url = URL.createObjectURL(new Blob([bom + text], { type: (MIME[ext] || "text/plain") + ";charset=utf-8" }));
+      const a = el("a", { href: url, download: filename }); document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } }, `⬇ ${filename}`);
+    code.parentElement.classList.add("has-dl");
+    code.parentElement.prepend(btn);
+  });
+}
+
+function messageNode(m, isLast, prev) {
   const bubble = el("div", { class: "bubble" });
-  if (m.role === "user") bubble.textContent = m.content; else bubble.innerHTML = renderMarkdown(m.content);
+  if (m.role === "user") bubble.textContent = m.content; else { bubble.innerHTML = renderMarkdown(m.content); enhanceCodeBlocks(bubble); }
   const atts = (m.attachments || []).length
     ? el("div", { class: "chips" }, ...m.attachments.map((a) => el("span", { class: "chip", title: a.name }, "📄 ", el("span", { class: "n" }, a.name))))
     : "";
   const actions = el("div", { class: "actions" },
     el("button", { onclick: () => navigator.clipboard.writeText(m.content) }, "コピー"));
   if (m.role === "user" && m.id) actions.append(el("button", { onclick: () => startEdit(m, wrap) }, "編集"));
+  let suggest = "";
+  if (m.role === "assistant" && m.id) {
+    const saveBtn = el("button", { onclick: (e) => { e.stopPropagation(); showExportMenu(saveBtn, m); } }, "ファイルに保存 ▾");
+    actions.append(saveBtn);
+    const fmt = prev?.role === "user" ? suggestFormat(prev.content) : null;
+    if (fmt) {
+      const label = EXPORT_FORMATS.find(([f]) => f === fmt)[1].replace(/（.*）/, "");
+      suggest = el("div", { class: "suggest" }, el("button", { onclick: () => download(exportUrl(m, fmt)) }, `📄 ${label} で保存`));
+    }
+  }
   if (m.role === "assistant" && m.id) actions.append(el("button", { onclick: () => branchFrom(m) }, "ここから分岐"));
   if (m.role === "assistant" && isLast && m.id) actions.append(el("button", { onclick: regenerate }, "再生成"));
-  const wrap = el("div", { class: `msg ${m.role}` }, atts, bubble, actions);
+  const wrap = el("div", { class: `msg ${m.role}` }, atts, bubble, suggest, actions);
   return wrap;
 }
 function startEdit(m, wrap) {

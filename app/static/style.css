@@ -81,6 +81,15 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .msg:hover .actions { opacity: 1; }
 .actions button { background: none; border: none; font-size: .8em; color: var(--muted); padding: 2px 6px; }
 .actions button:hover { color: var(--fg); }
+.export-menu { left: 0; right: auto; top: 100%; min-width: 220px; }
+.export-menu button { font-size: .9em; padding: .45em .8em; color: var(--fg); }
+.actions { position: relative; }
+.suggest { margin-top: 6px; }
+.suggest button { font-size: .85em; background: var(--bg2); border-color: var(--accent); color: var(--accent); }
+.bubble pre.has-dl { position: relative; padding-top: 34px; }
+.code-dl { position: absolute; top: 6px; right: 6px; font-size: .75em; padding: 2px 8px; background: var(--bg);
+  color: var(--muted); max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-dl:hover { color: var(--fg); }
 .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .edit-box { width: min(85%, 820px); display: flex; flex-direction: column; gap: 6px; }
@@ -122,3 +131,5 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
   #model-select { max-width: 120px; }
 }
 @media (min-width: 761px) { #toggle-sidebar { display: none; } }
+.msg .actions:has(.export-menu) { opacity: 1; }
+.export-menu.up { top: auto; bottom: 100%; }
