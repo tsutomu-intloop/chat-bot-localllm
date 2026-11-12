@@ -5,14 +5,16 @@ os.environ["SESSION_SECRET"] = "test"
 
 import pytest
 from fastapi.testclient import TestClient
+from app import files as filesvc
 from app import llm, main, store
 from tests.fake_firestore import FakeFirestore
 
 
 @pytest.fixture()
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     fs = FakeFirestore()
     store.set_client(fs)
+    filesvc.set_storage(filesvc.LocalStorage(str(tmp_path / "uploads")))
 
     seen = []
 
@@ -31,6 +33,7 @@ def client(monkeypatch):
         c.fs = fs
         yield c
     store.set_client(None)
+    filesvc.set_storage(None)
 
 
 def events(resp):

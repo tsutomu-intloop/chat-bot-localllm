@@ -86,6 +86,25 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .edit-box { width: min(85%, 820px); display: flex; flex-direction: column; gap: 6px; }
 .edit-box .row { display: flex; gap: 6px; justify-content: flex-end; }
 
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px 10px; font-size: .82em; max-width: 260px; }
+.chip .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip button { background: none; border: none; padding: 0 2px; color: var(--muted); font-size: 1em; }
+.chip.uploading { opacity: .6; }
+.msg.user .chips { justify-content: flex-end; margin-bottom: 4px; }
+.pending { max-width: 852px; width: 100%; margin: 0 auto; padding: 0 16px; }
+.files-btn span { font-size: .7em; vertical-align: super; }
+.files-menu { min-width: 300px; max-height: 50vh; overflow-y: auto; }
+.file-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: .88em; }
+.file-row .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row a { color: var(--accent); text-decoration: none; }
+.file-row button { width: auto; padding: 0 4px; }
+.drop-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; font-size: 1.3em;
+  background: rgba(37, 99, 235, .12); border: 3px dashed var(--accent); color: var(--accent); pointer-events: none; }
+.toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: var(--fg); color: var(--bg);
+  padding: 8px 14px; border-radius: 8px; font-size: .9em; z-index: 40; max-width: 90vw; }
+.composer .attach { align-self: center; }
 .composer { max-width: 852px; width: 100%; margin: 0 auto; padding: 12px 16px 18px; display: flex; gap: 8px; align-items: flex-end; }
 .composer textarea { flex: 1; resize: none; max-height: 40vh; line-height: 1.5; }
 

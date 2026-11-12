@@ -15,3 +15,8 @@ output "artifact_registry_repository" {
 output "llm_base_url" {
   value = local.llm_base_url
 }
+
+output "files_bucket" {
+  description = "アップロードファイルの保存先バケット"
+  value       = google_storage_bucket.files.name
+}

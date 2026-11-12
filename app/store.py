@@ -165,6 +165,7 @@ def update_conversation(user_id: str, conv_id: str, fields: dict) -> None:
 def delete_conversation(user_id: str, conv_id: str) -> None:
     ref = _convs(user_id).document(conv_id)
     _delete_messages(ref, [s.reference for s in ref.collection("messages").stream()])
+    _delete_messages(ref, [s.reference for s in ref.collection("files").stream()])
     ref.delete()
 
 
@@ -172,7 +173,7 @@ def delete_conversation(user_id: str, conv_id: str) -> None:
 def _msg_dict(snap) -> dict:
     d = snap.to_dict()
     return {"id": snap.id, "seq": d["seq"], "role": d["role"], "content": d["content"],
-            "created_at": d.get("created_at")}
+            "attachments": d.get("attachments") or [], "created_at": d.get("created_at")}
 
 
 def list_messages(user_id: str, conv_id: str) -> list[dict]:
@@ -193,7 +194,8 @@ def _search_text(messages: list[dict]) -> str:
 
 
 def add_message(user_id: str, conv_id: str, role: str, content: str,
-                extra_conv_fields: dict | None = None, existing: list[dict] | None = None) -> dict:
+                extra_conv_fields: dict | None = None, existing: list[dict] | None = None,
+                attachments: list[dict] | None = None) -> dict:
     """メッセージを追加し、会話の updated_at / 検索テキストを更新する.
 
     existing: 呼び出し側が取得済みの既存メッセージ (読み取り回数削減用).
@@ -203,6 +205,8 @@ def add_message(user_id: str, conv_id: str, role: str, content: str,
     seq = (msgs[-1]["seq"] + 1) if msgs else 0
     now = utcnow()
     msg = {"seq": seq, "role": role, "content": content, "created_at": now}
+    if attachments:
+        msg["attachments"] = attachments  # [{id, name}] 表示用
     msg_ref = conv_ref.collection("messages").document(new_id())
     batch = client().batch()
     batch.set(msg_ref, msg)
@@ -243,6 +247,38 @@ def duplicate_conversation(user_id: str, conv_id: str, upto_message_id: str | No
         batch = client().batch()
         for j, m in enumerate(msgs[i:i + BATCH_LIMIT], start=i):
             batch.set(conv_ref.collection("messages").document(new_id()),
-                      {"seq": j, "role": m["role"], "content": m["content"], "created_at": m["created_at"]})
+                      {"seq": j, "role": m["role"], "content": m["content"], "created_at": m["created_at"],
+                       **({"attachments": m["attachments"]} if m.get("attachments") else {})})
         batch.commit()
     return {"id": conv_ref.id, **data}
+
+
+# ---------- files (会話に添付されたファイルのメタ情報) ----------
+def _files(user_id: str, conv_id: str):
+    return _convs(user_id).document(conv_id).collection("files")
+
+
+def _file_dict(snap) -> dict | None:
+    if not snap.exists:
+        return None
+    return {"id": snap.id, **snap.to_dict()}
+
+
+def add_file(user_id: str, conv_id: str, file_id: str, meta: dict) -> dict:
+    data = {**meta, "created_at": utcnow()}
+    _files(user_id, conv_id).document(file_id).set(data)
+    return {"id": file_id, **data}
+
+
+def list_files(user_id: str, conv_id: str) -> list[dict]:
+    files = [f for f in (_file_dict(s) for s in _files(user_id, conv_id).stream()) if f]
+    files.sort(key=lambda f: f["created_at"])
+    return files
+
+
+def get_file(user_id: str, conv_id: str, file_id: str) -> dict | None:
+    return _file_dict(_files(user_id, conv_id).document(file_id).get())
+
+
+def delete_file(user_id: str, conv_id: str, file_id: str) -> None:
+    _files(user_id, conv_id).document(file_id).delete()

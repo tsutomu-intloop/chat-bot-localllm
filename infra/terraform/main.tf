@@ -11,6 +11,10 @@ locals {
       LLM_MODEL          = var.llm_model
       LLM_USE_ID_TOKEN   = tostring(var.llm_use_id_token)
       LLM_API_KEY_HEADER = var.llm_api_key_header
+      LLM_NUM_CTX        = tostring(var.llm_num_ctx)
+      FILES_BUCKET       = google_storage_bucket.files.name
+      MAX_UPLOAD_MB      = tostring(var.max_upload_mb)
+      FILE_CONTEXT_CHARS = tostring(var.file_context_chars)
       FIRESTORE_PROJECT  = var.project_id
       FIRESTORE_DATABASE = var.firestore_database
       AUTH_MODE          = var.auth_mode
@@ -30,6 +34,7 @@ resource "google_project_service" "services" {
     "artifactregistry.googleapis.com",
     "cloudbuild.googleapis.com",
     "iam.googleapis.com",
+    "storage.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
@@ -101,6 +106,35 @@ resource "google_firestore_database" "chat" {
   deletion_policy         = var.deletion_protection ? "ABANDON" : "DELETE"
 
   depends_on = [time_sleep.apis_ready]
+}
+
+# ---------- アップロードファイル (Cloud Storage) ----------
+resource "google_storage_bucket" "files" {
+  name                        = coalesce(var.files_bucket_name, "${var.project_id}-${var.service_name}-files")
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = !var.deletion_protection
+
+  dynamic "lifecycle_rule" {
+    for_each = var.files_retention_days > 0 ? [1] : []
+    content {
+      condition {
+        age = var.files_retention_days
+      }
+      action {
+        type = "Delete"
+      }
+    }
+  }
+
+  depends_on = [time_sleep.apis_ready]
+}
+
+resource "google_storage_bucket_iam_member" "app_files" {
+  bucket = google_storage_bucket.files.name
+  role   = "roles/storage.objectAdmin"
+  member = google_service_account.app.member
 }
 
 # ---------- セッション署名鍵 (Secret Manager) ----------
@@ -235,6 +269,7 @@ resource "google_cloud_run_v2_service" "app" {
     google_secret_manager_secret_version.llm_api_key,
     google_secret_manager_secret_iam_member.app_llm_api_key,
     google_project_iam_member.app_datastore,
+    google_storage_bucket_iam_member.app_files,
     google_firestore_database.chat,
   ]
 }

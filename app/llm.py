@@ -103,6 +103,9 @@ async def stream_chat(messages: list[dict], model: str | None = None) -> AsyncIt
     else:
         url = f"{settings.llm_base_url}/api/chat"
         payload = {"model": model, "messages": messages, "stream": True}
+        if settings.llm_num_ctx > 0:
+            # Ollama の既定コンテキスト長は小さく、ファイル内容などの長い入力が切り捨てられるため指定する
+            payload["options"] = {"num_ctx": settings.llm_num_ctx}
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:

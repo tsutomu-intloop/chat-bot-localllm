@@ -7,13 +7,16 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from urllib.parse import quote
+
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import llm, store
+from . import files as filesvc, llm, store
 from .auth import current_user, hash_password, verify_password
 from .config import settings
 
@@ -55,6 +58,8 @@ class SendMessage(BaseModel):
     content: str = Field(min_length=1)
     # 指定したメッセージ以降を削除してから送信 (メッセージ編集・再送)
     edit_message_id: str | None = None
+    # このメッセージと一緒にアップロードしたファイル (表示用. 回答には会話の全ファイルが使われる)
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class Duplicate(BaseModel):
@@ -75,7 +80,13 @@ def conv_out(c: dict) -> dict:
 
 
 def msg_out(m: dict) -> dict:
-    return {"id": m["id"], "role": m["role"], "content": m["content"], "created_at": _iso(m.get("created_at"))}
+    return {"id": m["id"], "role": m["role"], "content": m["content"],
+            "attachments": m.get("attachments") or [], "created_at": _iso(m.get("created_at"))}
+
+
+def file_out(f: dict) -> dict:
+    return {"id": f["id"], "name": f["name"], "content_type": f.get("content_type"), "size": f.get("size"),
+            "chars": f.get("chars"), "created_at": _iso(f.get("created_at"))}
 
 
 def own_conversation(user: dict, conv_id: str) -> dict:
@@ -93,6 +104,7 @@ def get_config():
         "allow_signup": settings.allow_signup,
         "default_model": settings.llm_model,
         "default_system_prompt": settings.system_prompt,
+        "max_upload_mb": settings.max_upload_mb,
     }
 
 
@@ -153,7 +165,8 @@ def create_conversation(body: ConversationCreate, user: dict = Depends(current_u
 def get_conversation(conv_id: str, user: dict = Depends(current_user)):
     conv = own_conversation(user, conv_id)
     msgs = store.list_messages(user["id"], conv_id)
-    return {**conv_out(conv), "messages": [msg_out(m) for m in msgs]}
+    files = store.list_files(user["id"], conv_id)
+    return {**conv_out(conv), "messages": [msg_out(m) for m in msgs], "files": [file_out(f) for f in files]}
 
 
 @app.patch("/api/conversations/{conv_id}")
@@ -177,6 +190,7 @@ def update_conversation(conv_id: str, body: ConversationUpdate, user: dict = Dep
 def delete_conversation(conv_id: str, user: dict = Depends(current_user)):
     own_conversation(user, conv_id)
     store.delete_conversation(user["id"], conv_id)
+    filesvc.storage().delete_prefix(f"users/{user['id']}/conversations/{conv_id}/files")
     return {"ok": True}
 
 
@@ -184,7 +198,80 @@ def delete_conversation(conv_id: str, user: dict = Depends(current_user)):
 def duplicate_conversation(conv_id: str, body: Duplicate, user: dict = Depends(current_user)):
     """過去の会話をコピー (指定メッセージまでで分岐) して再利用する."""
     own_conversation(user, conv_id)
-    return conv_out(store.duplicate_conversation(user["id"], conv_id, body.upto_message_id))
+    uid = user["id"]
+    new = store.duplicate_conversation(uid, conv_id, body.upto_message_id)
+    # 添付ファイルも同じ ID でコピー (メッセージの添付表示がそのまま使える)
+    st = filesvc.storage()
+    for f in store.list_files(uid, conv_id):
+        src, dst = filesvc.file_prefix(uid, conv_id, f["id"]), filesvc.file_prefix(uid, new["id"], f["id"])
+        st.copy(f"{src}/original", f"{dst}/original")
+        st.copy(f"{src}/text.txt", f"{dst}/text.txt")
+        meta = {k: v for k, v in f.items() if k not in ("id", "created_at")}
+        store.add_file(uid, new["id"], f["id"], {**meta, "text_key": f"{dst}/text.txt", "original_key": f"{dst}/original"})
+    return conv_out(new)
+
+
+# ---------- files ----------
+@app.post("/api/conversations/{conv_id}/files")
+async def upload_files(conv_id: str, files: list[UploadFile] = File(...), user: dict = Depends(current_user)):
+    """ファイルをアップロードし、テキストを抽出して会話に添付する."""
+    uid = user["id"]
+    await run_in_threadpool(own_conversation, user, conv_id)
+    existing = await run_in_threadpool(store.list_files, uid, conv_id)
+    if len(existing) + len(files) > settings.max_files_per_conversation:
+        raise HTTPException(400, f"1 つの会話に添付できるファイルは {settings.max_files_per_conversation} 件までです")
+
+    limit = settings.max_upload_mb * 1024 * 1024
+    results, errors = [], []
+    for up in files:
+        name = Path(up.filename or "file").name[:200]
+        data = await up.read(limit + 1)
+        if len(data) > limit:
+            errors.append(f"{name}: {settings.max_upload_mb}MB を超えています")
+            continue
+        try:
+            text = await run_in_threadpool(filesvc.extract_text, name, data)
+        except filesvc.UnsupportedFile as e:
+            errors.append(str(e))
+            continue
+        file_id = store.new_id()
+        prefix = filesvc.file_prefix(uid, conv_id, file_id)
+        st = filesvc.storage()
+        await run_in_threadpool(st.put, f"{prefix}/original", data, up.content_type or "")
+        await run_in_threadpool(st.put, f"{prefix}/text.txt", text.encode("utf-8"), "text/plain; charset=utf-8")
+        meta = {"name": name, "content_type": up.content_type or "", "size": len(data), "chars": len(text),
+                "text_key": f"{prefix}/text.txt", "original_key": f"{prefix}/original"}
+        results.append(file_out(await run_in_threadpool(store.add_file, uid, conv_id, file_id, meta)))
+    if not results and errors:
+        raise HTTPException(400, " / ".join(errors))
+    return {"files": results, "errors": errors}
+
+
+@app.get("/api/conversations/{conv_id}/files")
+def list_files(conv_id: str, user: dict = Depends(current_user)):
+    own_conversation(user, conv_id)
+    return {"files": [file_out(f) for f in store.list_files(user["id"], conv_id)]}
+
+
+@app.get("/api/conversations/{conv_id}/files/{file_id}")
+def download_file(conv_id: str, file_id: str, user: dict = Depends(current_user)):
+    own_conversation(user, conv_id)
+    f = store.get_file(user["id"], conv_id, file_id)
+    if f is None:
+        raise HTTPException(404, "ファイルが見つかりません")
+    data = filesvc.storage().get(f["original_key"])
+    return Response(data, media_type=f.get("content_type") or "application/octet-stream",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(f['name'])}"})
+
+
+@app.delete("/api/conversations/{conv_id}/files/{file_id}")
+def delete_file(conv_id: str, file_id: str, user: dict = Depends(current_user)):
+    own_conversation(user, conv_id)
+    if store.get_file(user["id"], conv_id, file_id) is None:
+        raise HTTPException(404, "ファイルが見つかりません")
+    store.delete_file(user["id"], conv_id, file_id)
+    filesvc.storage().delete_prefix(filesvc.file_prefix(user["id"], conv_id, file_id))
+    return {"ok": True}
 
 
 @app.get("/api/conversations/{conv_id}/export")
@@ -206,15 +293,21 @@ def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
-def _build_llm_messages(conv: dict, msgs: list[dict]) -> list[dict]:
+def _build_llm_messages(conv: dict, msgs: list[dict], files: list[dict] | None = None) -> list[dict]:
     history = [{"role": m["role"], "content": m["content"]} for m in msgs if m["content"]]
     history = history[-settings.max_history_messages:]
     system = conv.get("system_prompt") or settings.system_prompt
+    if files:
+        # 直近のユーザ発言 (2 件) を検索クエリにして、関連するファイル内容を渡す
+        query = "\n".join(m["content"] for m in [m for m in msgs if m["role"] == "user"][-2:])
+        ctx = filesvc.build_file_context(files, query)
+        if ctx:
+            system = f"{system}\n\n{ctx}" if system else ctx
     return ([{"role": "system", "content": system}] if system else []) + history
 
 
 def _stream_reply(user_id: str, conv: dict, msgs: list[dict], extra: dict | None = None) -> StreamingResponse:
-    llm_messages = _build_llm_messages(conv, msgs)
+    llm_messages = _build_llm_messages(conv, msgs, store.list_files(user_id, conv["id"]))
 
     async def gen():
         parts: list[str] = []
@@ -261,7 +354,13 @@ def send_message(conv_id: str, body: SendMessage, user: dict = Depends(current_u
     if not msgs and conv["title"] == DEFAULT_TITLE:
         extra_fields["title"] = body.content.strip().splitlines()[0][:40] or DEFAULT_TITLE
         conv["title"] = extra_fields["title"]
-    user_msg = store.add_message(uid, conv_id, "user", body.content, extra_fields, existing=msgs)
+    attachments = []
+    for fid in body.attachment_ids:
+        f = store.get_file(uid, conv_id, fid)
+        if f:
+            attachments.append({"id": f["id"], "name": f["name"]})
+    user_msg = store.add_message(uid, conv_id, "user", body.content, extra_fields, existing=msgs,
+                                 attachments=attachments)
     return _stream_reply(uid, conv, msgs + [user_msg], {"user_message_id": user_msg["id"], "title": conv["title"]})
 
 

@@ -6,7 +6,8 @@ Cloud Run 上にデプロイしたローカル LLM（Ollama / vLLM などの Ope
 ```
 ブラウザ ──> chat-bot (Cloud Run, FastAPI + Web UI) ──(ID トークン)──> Local LLM (Cloud Run: Ollama 等)
                        │
-                       └── 会話履歴 (Firestore)
+                       ├── 会話履歴・ファイル情報 (Firestore)
+                       └── アップロードファイル (Cloud Storage)
 ```
 
 ## 機能
@@ -22,7 +23,23 @@ Cloud Run 上にデプロイしたローカル LLM（Ollama / vLLM などの Ope
 | ピン留め・名前変更・削除 | よく使う会話を上部に固定 |
 | 会話ごとの設定 | モデル選択・システムプロンプト |
 | エクスポート | Markdown / JSON |
+| ファイル添付 | 📎・ドラッグ＆ドロップ・貼り付けで PDF / Word / Excel / PowerPoint / テキスト・ソースコードを添付し、その内容を踏まえて回答（詳細は下記） |
 | ストリーミング | 応答を逐次表示、途中停止可（停止までの内容も保存） |
+
+## ファイル添付の仕組み
+
+1. アップロード時にテキストを抽出し、元ファイルと抽出テキストを Cloud Storage に、ファイル名などの情報を Firestore に保存します。
+   - 対応形式: PDF（テキストを含むもの）、Word（.docx）、Excel（.xlsx/.xlsm、シートごとに CSV 化）、PowerPoint（.pptx、ノート含む）、
+     テキスト・Markdown・CSV・JSON・ソースコードなど（UTF-8 / Shift_JIS / EUC-JP を自動判別）
+   - 未対応: 画像、スキャンした画像だけの PDF（llama3.1 は画像を読めないため）、旧形式の .doc/.xls/.ppt
+2. ファイルは**会話単位**で保持され、その会話の以降のすべての回答で参照されます（📎 ボタンの一覧から削除すると参照されなくなります）。
+3. 回答時、ファイル本文の合計が `FILE_CONTEXT_CHARS`（既定 8,000 文字）以内なら全文を、超える場合は
+   直近の質問に関連する部分（約 1,200 文字のチャンク）だけを検索して LLM に渡します。
+   検索は BM25（日本語は文字 2-gram）で、追加の埋め込みモデルは不要です。
+4. Ollama の既定のコンテキスト長は小さく長い入力が切り捨てられるため、`LLM_NUM_CTX`（既定 16,384）を指定しています。
+
+大きな資料で精度が足りない場合は、`FILE_CONTEXT_CHARS` と `LLM_NUM_CTX` を一緒に増やしてください
+（日本語はおおむね 1 文字 1〜1.5 トークン。GPU メモリの使用量も増えます）。
 
 ## ローカルで動かす
 
@@ -64,9 +81,15 @@ gcloud run services proxy ollama --region asia-northeast1 --port 11434
 | `LLM_API_KEY_HEADER` | `Authorization` | API キーを送るヘッダ。`Authorization` は `Bearer` 形式、それ以外（`X-API-Key` 等）はキーをそのまま送信 |
 | `LLM_TIMEOUT` | `300` | LLM 応答のタイムアウト秒 |
 | `SYSTEM_PROMPT` | 日本語アシスタント | 既定のシステムプロンプト |
+| `LLM_NUM_CTX` | `16384` | Ollama のコンテキスト長（`0` で Ollama の既定値） |
 | `MAX_HISTORY_MESSAGES` | `40` | LLM に送る直近の履歴件数 |
 | `FIRESTORE_PROJECT` | 実行環境の既定 | 履歴を保存する Firestore のプロジェクト |
 | `FIRESTORE_DATABASE` | `(default)` | Firestore のデータベース ID |
+| `FILES_BUCKET` | - | アップロードファイルの保存先バケット。未指定時はローカルディスク（`FILES_LOCAL_DIR`、既定 `./data/uploads`） |
+| `MAX_UPLOAD_MB` | `20` | 1 ファイルの最大サイズ（Cloud Run の上限 32MB 未満） |
+| `MAX_FILES_PER_CONVERSATION` | `20` | 1 会話に添付できるファイル数 |
+| `FILE_CONTEXT_CHARS` | `8000` | 1 回の回答で LLM に渡すファイル本文の上限文字数 |
+| `FILE_CHUNK_CHARS` | `1200` | 検索用チャンクの文字数 |
 | `AUTH_MODE` | `local` | `local` / `iap` |
 | `ALLOW_SIGNUP` | `true` | 画面からの新規登録を許可 |
 | `SESSION_SECRET` | ランダム | セッション Cookie 署名鍵。**本番では必ず固定値を設定** |
@@ -83,8 +106,13 @@ gcloud run services proxy ollama --region asia-northeast1 --port 11434
 users/{user_id}                                      username, password_hash, created_at
   conversations/{conv_id}                            title, model, system_prompt, pinned,
                                                      search_text, created_at, updated_at
-    messages/{msg_id}                                seq, role, content, created_at
+    messages/{msg_id}                                seq, role, content, attachments, created_at
+    files/{file_id}                                  name, content_type, size, chars,
+                                                     original_key, text_key, created_at
 ```
+
+ファイル本体は Cloud Storage の `users/{user_id}/conversations/{conv_id}/files/{file_id}/`（`original` と `text.txt`）に保存します。
+会話を削除するとファイルも削除されます。
 
 - 追加のインデックス作成は不要です（単一フィールドの自動インデックスのみ使用）。
 - Firestore は部分一致検索ができないため、会話ドキュメントに本文を小文字化した `search_text` を保持し、
@@ -101,8 +129,9 @@ users/{user_id}                                      username, password_hash, cr
 | `google_artifact_registry_repository` | コンテナイメージの保存先（直近 10 バージョンを保持） |
 | `google_service_account` | チャットボット専用サービスアカウント |
 | `google_firestore_database` | 会話履歴用 Firestore（ネイティブモード、削除保護あり） |
+| `google_storage_bucket` | アップロードファイルの保存先（公開アクセス禁止。`files_retention_days` で自動削除も可） |
 | `google_secret_manager_secret` | セッション Cookie 署名鍵（`random_password` で生成） |
-| IAM | Firestore 読み書き（`roles/datastore.user`）、署名鍵の参照、**既存 LLM サービスの `roles/run.invoker`** |
+| IAM | Firestore 読み書き（`roles/datastore.user`）、バケットの読み書き（`roles/storage.objectAdmin`）、署名鍵の参照、**既存 LLM サービスの `roles/run.invoker`** |
 | `google_cloud_run_v2_service` | チャットボット本体（タイムアウト 3600 秒、`/healthz` のプローブ） |
 | 公開設定 | `allow_unauthenticated=true` で allUsers に公開（アプリ側でログイン）、`false` で `invoker_members` のみ |
 
@@ -164,6 +193,9 @@ Cloud Run に IAP を有効化し、`AUTH_MODE=iap` を設定すると、IAP が
 | POST | `/api/conversations/{id}/regenerate` | 最後の応答を再生成（SSE） |
 | POST | `/api/conversations/{id}/duplicate` | 複製・分岐（`upto_message_id`） |
 | GET | `/api/conversations/{id}/export?format=md\|json` | エクスポート |
+| POST | `/api/conversations/{id}/files` | ファイルアップロード（multipart、`files` に複数可） |
+| GET | `/api/conversations/{id}/files` | 添付ファイル一覧 |
+| GET / DELETE | `/api/conversations/{id}/files/{file_id}` | ダウンロード / 削除 |
 | GET | `/api/models` | LLM サーバのモデル一覧 |
 
 ## テスト

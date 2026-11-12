@@ -13,3 +13,4 @@ __pycache__/
 crash.log
 .terraform.lock.hcl.bak
 backend.tf
+data/

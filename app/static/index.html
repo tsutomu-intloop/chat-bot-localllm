@@ -41,6 +41,10 @@
         <button id="toggle-sidebar" class="icon" title="履歴">☰</button>
         <h2 id="conv-title" class="conv-title" title="クリックで名前を変更">新しい会話</h2>
         <select id="model-select" title="モデル"></select>
+        <div class="menu-wrap">
+          <button id="files-btn" class="icon files-btn" title="この会話のファイル">📎<span id="files-count"></span></button>
+          <div id="files-menu" class="menu files-menu hidden"></div>
+        </div>
         <button id="settings-btn" class="icon" title="会話の設定">⚙</button>
         <div class="menu-wrap">
           <button id="more-btn" class="icon" title="その他">⋯</button>
@@ -57,10 +61,17 @@
         <div id="empty" class="empty">
           <h1>何をお手伝いしましょうか？</h1>
           <p class="muted">会話は自動で保存され、左の履歴からいつでも再開・複製できます。</p>
+          <p class="muted">📎 から PDF・Word・Excel・PowerPoint・テキストを添付すると、その内容を踏まえて回答します。</p>
         </div>
       </section>
 
+      <div id="drop-overlay" class="drop-overlay hidden">ここにファイルをドロップして添付</div>
+
+      <div id="pending" class="pending hidden"></div>
       <form id="composer" class="composer">
+        <input id="file-input" type="file" multiple class="hidden"
+          accept=".txt,.md,.csv,.tsv,.json,.jsonl,.yaml,.yml,.xml,.html,.log,.sql,.py,.js,.ts,.java,.go,.rb,.php,.c,.cpp,.cs,.rs,.sh,.tf,.pdf,.docx,.xlsx,.xlsm,.pptx">
+        <button id="attach" type="button" class="icon attach" title="ファイルを添付 (PDF / Word / Excel / PowerPoint / テキスト)">📎</button>
         <textarea id="input" rows="1" placeholder="メッセージを入力 (Enter で送信 / Shift+Enter で改行)"></textarea>
         <button id="send" type="submit" class="primary">送信</button>
         <button id="stop" type="button" class="hidden">停止</button>

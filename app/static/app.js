@@ -1,6 +1,7 @@
 "use strict";
 const $ = (s) => document.querySelector(s);
-const state = { config: null, me: null, convs: [], current: null, models: [], streaming: null, signup: false };
+const state = { config: null, me: null, convs: [], current: null, models: [], streaming: null, signup: false,
+  pending: [] /* 次のメッセージと一緒に送る添付ファイル */, uploading: 0 };
 
 // ---------- API ----------
 async function api(path, opts = {}) {
@@ -144,7 +145,8 @@ function renderMessages() {
   const msgs = state.current?.messages || [];
   if (!msgs.length) {
     box.append(el("div", { class: "empty" }, el("h1", {}, "何をお手伝いしましょうか？"),
-      el("p", { class: "muted" }, "会話は自動で保存され、左の履歴からいつでも再開・複製できます。")));
+      el("p", { class: "muted" }, "会話は自動で保存され、左の履歴からいつでも再開・複製できます。"),
+      el("p", { class: "muted" }, "📎 やドラッグ＆ドロップで PDF・Word・Excel・PowerPoint・テキストを添付すると、その内容を踏まえて回答します。")));
     return;
   }
   msgs.forEach((m, idx) => box.append(messageNode(m, idx === msgs.length - 1)));
@@ -153,12 +155,15 @@ function renderMessages() {
 function messageNode(m, isLast) {
   const bubble = el("div", { class: "bubble" });
   if (m.role === "user") bubble.textContent = m.content; else bubble.innerHTML = renderMarkdown(m.content);
+  const atts = (m.attachments || []).length
+    ? el("div", { class: "chips" }, ...m.attachments.map((a) => el("span", { class: "chip", title: a.name }, "📄 ", el("span", { class: "n" }, a.name))))
+    : "";
   const actions = el("div", { class: "actions" },
     el("button", { onclick: () => navigator.clipboard.writeText(m.content) }, "コピー"));
   if (m.role === "user" && m.id) actions.append(el("button", { onclick: () => startEdit(m, wrap) }, "編集"));
   if (m.role === "assistant" && m.id) actions.append(el("button", { onclick: () => branchFrom(m) }, "ここから分岐"));
   if (m.role === "assistant" && isLast && m.id) actions.append(el("button", { onclick: regenerate }, "再生成"));
-  const wrap = el("div", { class: `msg ${m.role}` }, bubble, actions);
+  const wrap = el("div", { class: `msg ${m.role}` }, atts, bubble, actions);
   return wrap;
 }
 function startEdit(m, wrap) {
@@ -173,21 +178,23 @@ function startEdit(m, wrap) {
 async function openConv(id) {
   if (state.streaming) state.streaming.abort();
   state.current = await api(`/api/conversations/${id}`);
+  state.pending = [];
   localStorage.setItem("lastConv", id);
-  updateHeader(); renderMessages(); renderConvList();
+  updateHeader(); renderMessages(); renderConvList(); renderPending();
 }
 function newConv() {
   if (state.streaming) state.streaming.abort();
-  state.current = { id: null, title: "新しい会話", model: null, system_prompt: null, messages: [] };
+  state.current = { id: null, title: "新しい会話", model: null, system_prompt: null, messages: [], files: [] };
+  state.pending = [];
   localStorage.removeItem("lastConv");
-  updateHeader(); renderMessages(); renderConvList();
+  updateHeader(); renderMessages(); renderConvList(); renderPending();
   $("#input").focus();
 }
 async function ensureConv() {
   if (state.current?.id) return state.current;
   const c = await api("/api/conversations", { method: "POST",
     body: { model: state.current?.model || null, system_prompt: state.current?.system_prompt || null } });
-  state.current = { ...c, messages: [] };
+  state.current = { ...c, messages: [], files: [] };
   localStorage.setItem("lastConv", c.id);
   return state.current;
 }
@@ -197,7 +204,103 @@ function updateHeader() {
   document.title = `${c?.title || "新しい会話"} - Local LLM Chat`;
   const sel = $("#model-select");
   sel.value = c?.model || state.config.default_model;
+  renderFilesMenu();
 }
+
+// ---------- files ----------
+function toast(msg, ms = 4000) {
+  const t = el("div", { class: "toast" }, msg);
+  document.body.append(t);
+  setTimeout(() => t.remove(), ms);
+}
+function fmtSize(n) {
+  if (n == null) return "";
+  if (n < 1024) return `${n}B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(0)}KB`;
+  return `${(n / 1048576).toFixed(1)}MB`;
+}
+function renderFilesMenu() {
+  const files = state.current?.files || [];
+  $("#files-count").textContent = files.length ? files.length : "";
+  const menu = $("#files-menu");
+  menu.innerHTML = "";
+  if (!files.length) {
+    menu.append(el("div", { class: "file-row muted" }, "この会話にファイルはありません。📎 から添付できます。"));
+    return;
+  }
+  menu.append(el("div", { class: "file-row muted" }, "この会話のファイル（回答時に参照されます）"));
+  for (const f of files) {
+    menu.append(el("div", { class: "file-row" },
+      el("span", { class: "n", title: f.name }, "📄 " + f.name),
+      el("span", { class: "muted" }, fmtSize(f.size)),
+      el("a", { href: `/api/conversations/${state.current.id}/files/${f.id}`, title: "ダウンロード" }, "⬇"),
+      el("button", { class: "icon", title: "削除（以降の回答で参照されなくなります）", onclick: (e) => { e.stopPropagation(); removeFile(f); } }, "✕")));
+  }
+}
+function renderPending() {
+  const box = $("#pending");
+  box.innerHTML = "";
+  const items = [...state.pending.map((f) => ({ ...f, done: true }))];
+  for (let i = 0; i < state.uploading; i++) items.push({ name: "アップロード中…", done: false });
+  box.classList.toggle("hidden", !items.length);
+  if (!items.length) return;
+  box.append(el("div", { class: "chips" }, ...items.map((f) => el("span", { class: "chip" + (f.done ? "" : " uploading"), title: f.name },
+    "📄 ", el("span", { class: "n" }, f.name), f.done ? el("span", { class: "muted" }, " " + fmtSize(f.size)) : "",
+    f.done ? el("button", { type: "button", title: "添付を取り消す", onclick: () => removeFile(f) }, "✕") : ""))));
+}
+async function removeFile(f) {
+  if (!confirm(`「${f.name}」を削除しますか？`)) return;
+  await api(`/api/conversations/${state.current.id}/files/${f.id}`, { method: "DELETE" });
+  state.pending = state.pending.filter((p) => p.id !== f.id);
+  state.current.files = (state.current.files || []).filter((p) => p.id !== f.id);
+  renderPending(); renderFilesMenu();
+}
+async function uploadFiles(fileList) {
+  const list = [...fileList];
+  if (!list.length) return;
+  const maxMb = state.config.max_upload_mb || 20;
+  const ok = list.filter((f) => f.size <= maxMb * 1048576);
+  if (ok.length < list.length) toast(`${maxMb}MB を超えるファイルは添付できません`);
+  if (!ok.length) return;
+  const c = await ensureConv();
+  state.uploading += ok.length; renderPending();
+  const fd = new FormData();
+  ok.forEach((f) => fd.append("files", f, f.name));
+  try {
+    const res = await fetch(`/api/conversations/${c.id}/files`, { method: "POST", body: fd, credentials: "same-origin" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    state.pending.push(...data.files);
+    c.files = [...(c.files || []), ...data.files];
+    if (data.errors?.length) toast(data.errors.join(" / "), 6000);
+  } catch (err) {
+    toast("アップロードに失敗しました: " + err.message, 6000);
+  } finally {
+    state.uploading -= ok.length;
+    renderPending(); renderFilesMenu(); loadConvs();
+  }
+}
+$("#attach").onclick = () => $("#file-input").click();
+$("#file-input").onchange = (e) => { uploadFiles(e.target.files); e.target.value = ""; };
+$("#files-btn").onclick = (e) => { e.stopPropagation(); $("#more-menu").classList.add("hidden"); $("#files-menu").classList.toggle("hidden"); };
+$("#files-menu").onclick = (e) => e.stopPropagation();
+document.addEventListener("click", () => $("#files-menu").classList.add("hidden"));
+// ドラッグ & ドロップ
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+window.addEventListener("dragenter", (e) => { if (!hasFiles(e) || $("#app-view").classList.contains("hidden")) return; e.preventDefault(); dragDepth++; $("#drop-overlay").classList.remove("hidden"); });
+window.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("#drop-overlay").classList.add("hidden"); } });
+window.addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; $("#drop-overlay").classList.add("hidden");
+  if (!$("#app-view").classList.contains("hidden")) uploadFiles(e.dataTransfer.files);
+});
+// クリップボードからの貼り付け (ファイル)
+$("#input").addEventListener("paste", (e) => {
+  const fs = [...(e.clipboardData?.files || [])];
+  if (fs.length) { e.preventDefault(); uploadFiles(fs); }
+});
 
 // ---------- sending ----------
 function setStreaming(ctrl) {
@@ -243,9 +346,11 @@ async function send(text, editId = null) {
     const i = c.messages.findIndex((m) => m.id === editId);
     if (i >= 0) c.messages = c.messages.slice(0, i);
   }
-  c.messages.push({ role: "user", content: text });
+  const atts = editId ? [] : state.pending.map((f) => ({ id: f.id, name: f.name }));
+  if (!editId) { state.pending = []; renderPending(); }
+  c.messages.push({ role: "user", content: text, attachments: atts });
   renderMessages();
-  await runStream(`/api/conversations/${c.id}/messages`, { content: text, edit_message_id: editId });
+  await runStream(`/api/conversations/${c.id}/messages`, { content: text, edit_message_id: editId, attachment_ids: atts.map((a) => a.id) });
 }
 async function regenerate() {
   if (state.streaming || !state.current?.id) return;
@@ -267,8 +372,11 @@ input.onkeydown = (e) => {
 };
 $("#composer").onsubmit = (e) => {
   e.preventDefault();
-  const text = input.value.trim();
-  if (!text || state.streaming) return;
+  let text = input.value.trim();
+  if (state.streaming) return;
+  if (state.uploading) { toast("アップロードの完了をお待ちください"); return; }
+  if (!text && state.pending.length) text = "添付したファイルの内容を要約してください。";
+  if (!text) return;
   input.value = ""; autoGrow();
   send(text);
 };
@@ -301,7 +409,7 @@ $("#settings-dialog").onclose = async () => {
   state.current.system_prompt = sp;
   if (state.current.id) await api(`/api/conversations/${state.current.id}`, { method: "PATCH", body: { system_prompt: sp } });
 };
-$("#more-btn").onclick = (e) => { e.stopPropagation(); $("#more-menu").classList.toggle("hidden"); };
+$("#more-btn").onclick = (e) => { e.stopPropagation(); $("#files-menu").classList.add("hidden"); $("#more-menu").classList.toggle("hidden"); };
 document.addEventListener("click", () => $("#more-menu").classList.add("hidden"));
 $("#more-menu").onclick = async (e) => {
   const act = e.target.dataset.act;

@@ -128,8 +128,9 @@ variable "cpu" {
 }
 
 variable "memory" {
-  type    = string
-  default = "512Mi"
+  description = "PDF / Office ファイルのテキスト抽出を行うため 1Gi 以上を推奨"
+  type        = string
+  default     = "1Gi"
 }
 
 variable "deletion_protection" {
@@ -161,4 +162,35 @@ variable "llm_api_key_header" {
   description = "API キーを送るヘッダ名. Authorization の場合は Bearer 形式、それ以外 (X-API-Key 等) はキーをそのまま送る"
   type        = string
   default     = "Authorization"
+}
+
+# ---------- ファイルアップロード ----------
+variable "files_bucket_name" {
+  description = "アップロードファイルを保存する Cloud Storage バケット名 (未指定時は <project_id>-<service_name>-files)"
+  type        = string
+  default     = null
+}
+
+variable "files_retention_days" {
+  description = "アップロードファイルを自動削除するまでの日数 (0 で無期限). 期限切れのファイルは回答で参照できなくなる"
+  type        = number
+  default     = 0
+}
+
+variable "max_upload_mb" {
+  description = "1 ファイルあたりの最大サイズ (MB). Cloud Run のリクエスト上限 32MB 未満にすること"
+  type        = number
+  default     = 20
+}
+
+variable "file_context_chars" {
+  description = "1 回の回答で LLM に渡すファイル本文の上限文字数. 超える場合は質問に関連する部分だけを渡す"
+  type        = number
+  default     = 8000
+}
+
+variable "llm_num_ctx" {
+  description = "Ollama のコンテキスト長 (num_ctx). ファイル内容を渡すため既定より大きくする. 0 で Ollama の既定値"
+  type        = number
+  default     = 16384
 }
