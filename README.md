@@ -10,6 +10,10 @@ Cloud Run 上にデプロイしたローカル LLM（Ollama / vLLM などの Ope
                        └── アップロードファイル (Cloud Storage)
 ```
 
+![システム構成](docs/architecture.png)
+
+システム構成の資料（PowerPoint）: [docs/architecture.pptx](docs/architecture.pptx)
+
 ## 機能
 
 | 機能 | 内容 |
